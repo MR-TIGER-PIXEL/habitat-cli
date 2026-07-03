@@ -1,0 +1,8 @@
+[
+  {
+    "name": "core-pack",
+    "chargeAmount": 82,
+    "isCharging": false,
+    "powerTarget": "habitat-grid"
+  }
+]

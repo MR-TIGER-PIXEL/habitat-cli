@@ -269,6 +269,41 @@ function printBattery(battery: Battery): void {
   console.log(`powerTarget: ${battery.powerTarget ?? "(none)"}`);
 }
 
+function printStatus(airlocks: Airlock[], sensors: Sensor[], batteries: Battery[]): void {
+  console.log("Habitat Summary");
+  console.log(`airlocks: ${airlocks.length}`);
+  console.log(`sensors: ${sensors.length}`);
+  console.log(`batteries: ${batteries.length}`);
+
+  console.log("");
+  console.log("Airlocks:");
+
+  if (airlocks.length === 0) {
+    console.log("- (none)");
+  } else {
+    for (const airlock of airlocks) {
+      const connectedSensors =
+        airlock.sensorNames.length > 0 ? airlock.sensorNames.join(", ") : "(none)";
+      console.log(
+        `- ${airlock.name} | pressure=${airlock.pressureLevel} | door=${airlock.doorStatus} | sanitation=${airlock.sanitation} | sensors=${connectedSensors}`,
+      );
+    }
+  }
+
+  console.log("");
+  console.log("Batteries:");
+
+  if (batteries.length === 0) {
+    console.log("- (none)");
+  } else {
+    for (const battery of batteries) {
+      console.log(
+        `- ${battery.name} | charge=${battery.chargeAmount} | charging=${battery.isCharging} | powerTarget=${battery.powerTarget ?? "(none)"}`,
+      );
+    }
+  }
+}
+
 function dedent(text: string): string {
   return text.trim().replace(/^ {2}/gm, "");
 }
@@ -297,6 +332,13 @@ const batteryCommand = configureCommand(
     .command("battery")
     .description("Manage batteries, charging state, and power targets."),
 );
+
+program
+  .command("status")
+  .description("Show a summary of the current habitat from local JSON data.")
+  .action(() => {
+    printStatus(readAirlocks(), readSensors(), readBatteries());
+  });
 
 airlockCommand
   .command("create")
@@ -780,11 +822,13 @@ program.addHelpText(
   "after",
   dedent(`
     Command Groups:
+      status    Show a current summary of airlocks, sensors, and batteries
       airlock   Create, inspect, and operate habitat airlocks
       sensor    Create and manage sensors attached to airlocks
       battery   Create and manage batteries and power targets
 
     Examples:
+      habitat status
       habitat airlock list
       habitat airlock show alpha
       habitat sensor create --name temp-1 --type temperature --reading 21.5 --status active

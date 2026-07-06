@@ -1,14 +1,15 @@
 {
   "name": "habitat",
   "version": "0.1.0",
-  "description": "Minimal habitat command-line app",
+  "description": "Kepler habitat registration CLI for the lab",
   "type": "module",
   "bin": {
-    "habitat": "./src/index.ts"
+    "habitat": "./habitat"
   },
   "scripts": {
-    "habitat": "bun run ./src/index.ts",
-    "start": "bun run ./src/index.ts"
+    "habitat": "./habitat",
+    "start": "./habitat",
+    "test": "bun test"
   },
   "dependencies": {
     "commander": "^14.0.0"

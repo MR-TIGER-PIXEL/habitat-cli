@@ -26,19 +26,81 @@ export type HabitatDetails = {
   lastSeenAt: string | null;
 };
 
+export type RuntimeAttributes = Record<string, unknown>;
+
+export type StoredBlueprint = {
+  id: string;
+  blueprintId: string;
+  displayName: string;
+  description: string;
+  status: "draft" | "published";
+  output: Record<string, unknown>;
+  inputs: Record<string, unknown>;
+  productionCost?: Record<string, unknown>;
+  requiredFacility?: Record<string, unknown>;
+  buildTicks: number;
+  prerequisites?: string[];
+  unlocks?: string[];
+  repeatable: boolean;
+  level?: number | null;
+  target?: Record<string, unknown>;
+  facilityLevel?: Record<string, unknown>;
+  attachmentPoints?: Record<string, unknown>;
+  attachmentRequirements?: Array<Record<string, unknown>>;
+  runtimeAttributes?: RuntimeAttributes;
+  capabilities?: string[];
+};
+
+export type LocalHabitatModule = {
+  id: string;
+  blueprintId: string;
+  displayName: string;
+  connectedTo: string[];
+  runtimeAttributes: RuntimeAttributes;
+  capabilities: string[];
+  source: "registration" | "local";
+};
+
+type StarterModuleInstance = {
+  id: string;
+  blueprintId: string;
+  displayName: string;
+  connectedTo: string[];
+  runtimeAttributes: RuntimeAttributes;
+  capabilities: string[];
+};
+
 type HabitatRegistrationResponse = {
   habitatId: string;
-  starterModules: unknown[];
-  blueprints: unknown[];
+  starterModules: StarterModuleInstance[];
+  blueprints: StoredBlueprint[];
 };
 
 type HabitatResponse = {
   habitat: HabitatDetails;
 };
 
+export type ModuleCreateInput = {
+  id: string;
+  blueprintId: string;
+  displayName: string;
+  connectedTo?: string[];
+  runtimeAttributes?: RuntimeAttributes;
+  capabilities?: string[];
+};
+
+export type ModuleUpdateInput = {
+  displayName?: string;
+  connectedTo?: string[];
+  runtimeAttributes?: RuntimeAttributes;
+  capabilities?: string[];
+};
+
 const DEFAULT_BASE_URL = "https://planet.turingguild.com";
 const HABITAT_DIRECTORY = ".habitat";
 const REGISTRATION_FILE = "registration.json";
+const MODULES_FILE = "modules.json";
+const BLUEPRINTS_FILE = "blueprints.json";
 
 export class CliError extends Error {
   constructor(message: string) {
@@ -101,9 +163,13 @@ export async function registerHabitat(
 ): Promise<{
   registration: RegistrationRecord;
   response: HabitatRegistrationResponse;
+  modules: LocalHabitatModule[];
+  blueprints: Record<string, StoredBlueprint>;
 }> {
   if (readStoredRegistration(config.cwd)) {
-    throw new CliError("Habitat is already registered locally. Run `habitat status` or `habitat unregister`.");
+    throw new CliError(
+      "Habitat is already registered locally. Run `habitat status` or `habitat unregister`.",
+    );
   }
 
   const habitatUuid = crypto.randomUUID();
@@ -126,14 +192,20 @@ export async function registerHabitat(
     baseUrl: config.baseUrl,
   };
 
-  writeStoredRegistration(config.cwd, registration);
+  const modules = response.starterModules.map(hydrateStarterModule);
+  const blueprints = indexBlueprintsById(response.blueprints);
 
-  return { registration, response };
+  writeStoredRegistration(config.cwd, registration);
+  writeStoredModules(config.cwd, modules);
+  writeStoredBlueprints(config.cwd, blueprints);
+
+  return { registration, response, modules, blueprints };
 }
 
 export async function getRegistrationStatus(config: CliConfig): Promise<{
   registration: RegistrationRecord;
   habitat: HabitatDetails;
+  moduleCount: number;
 }> {
   const registration = requireStoredRegistration(config.cwd);
   const response = await requestJson<HabitatResponse>(
@@ -147,6 +219,7 @@ export async function getRegistrationStatus(config: CliConfig): Promise<{
   return {
     registration,
     habitat: response.habitat,
+    moduleCount: readStoredModules(config.cwd).length,
   };
 }
 
@@ -155,8 +228,196 @@ export async function unregisterHabitat(config: CliConfig): Promise<Registration
   await requestWithoutJson(config, `/habitats/${registration.habitatId}`, {
     method: "DELETE",
   });
-  deleteStoredRegistration(config.cwd);
+  deleteStoredState(config.cwd);
   return registration;
+}
+
+export function listModules(config: CliConfig): LocalHabitatModule[] {
+  requireStoredRegistration(config.cwd);
+  return readStoredModules(config.cwd);
+}
+
+export function resolveModuleReference(config: CliConfig, reference: string): LocalHabitatModule {
+  requireStoredRegistration(config.cwd);
+  return resolveModuleReferenceFromModules(readStoredModules(config.cwd), reference);
+}
+
+export function showModule(
+  config: CliConfig,
+  moduleReference: string,
+): { module: LocalHabitatModule; blueprint: StoredBlueprint | null } {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+  const module = resolveModuleReferenceFromModules(modules, moduleReference);
+
+  const blueprint = readStoredBlueprints(config.cwd)[module.blueprintId] ?? null;
+  return { module, blueprint };
+}
+
+export function createModule(config: CliConfig, input: ModuleCreateInput): LocalHabitatModule {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+
+  if (modules.some((module) => module.id === input.id)) {
+    throw new CliError(`Module "${input.id}" already exists.`);
+  }
+
+  const module: LocalHabitatModule = {
+    id: input.id,
+    blueprintId: input.blueprintId,
+    displayName: input.displayName,
+    connectedTo: input.connectedTo ?? [],
+    runtimeAttributes: input.runtimeAttributes ?? {},
+    capabilities: input.capabilities ?? [],
+    source: "local",
+  };
+
+  modules.push(module);
+  writeStoredModules(config.cwd, modules);
+  return module;
+}
+
+export function updateModule(
+  config: CliConfig,
+  moduleReference: string,
+  input: ModuleUpdateInput,
+): LocalHabitatModule {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+  const module = resolveModuleReferenceFromModules(modules, moduleReference);
+
+  if (input.displayName !== undefined) {
+    module.displayName = input.displayName;
+  }
+
+  if (input.connectedTo !== undefined) {
+    module.connectedTo = input.connectedTo;
+  }
+
+  if (input.runtimeAttributes !== undefined) {
+    module.runtimeAttributes = input.runtimeAttributes;
+  }
+
+  if (input.capabilities !== undefined) {
+    module.capabilities = input.capabilities;
+  }
+
+  writeStoredModules(config.cwd, modules);
+  return module;
+}
+
+export function deleteModule(config: CliConfig, moduleId: string): LocalHabitatModule {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+  const targetModule = resolveModuleReferenceFromModules(modules, moduleId);
+  const index = modules.findIndex((item) => item.id === targetModule.id);
+
+  const [removed] = modules.splice(index, 1);
+  writeStoredModules(config.cwd, modules);
+  return removed;
+}
+
+export function formatModuleListEntry(
+  module: LocalHabitatModule,
+  modules: LocalHabitatModule[],
+): string {
+  return `${getModuleAlias(module, modules)} | ${module.displayName} | ${module.blueprintId} | source=${module.source}`;
+}
+
+export function parseJsonArray(value: string, label: string): string[] {
+  const parsed = parseJsonValue(value, label);
+
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== "string")) {
+    throw new CliError(`Invalid ${label}. Use a JSON array of strings.`);
+  }
+
+  return parsed;
+}
+
+export function parseJsonObject(value: string, label: string): RuntimeAttributes {
+  const parsed = parseJsonValue(value, label);
+
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new CliError(`Invalid ${label}. Use a JSON object.`);
+  }
+
+  return parsed as RuntimeAttributes;
+}
+
+function parseJsonValue(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new CliError(`Invalid ${label}. Use valid JSON.`);
+  }
+}
+
+function resolveModuleReferenceFromModules(
+  modules: LocalHabitatModule[],
+  reference: string,
+): LocalHabitatModule {
+  const exactMatch = modules.find((item) => item.id === reference);
+  if (exactMatch) {
+    return exactMatch;
+  }
+
+  const aliasMatch = modules.find((item) => getModuleAlias(item, modules) === reference);
+  if (aliasMatch) {
+    return aliasMatch;
+  }
+
+  throw new CliError(`Module "${reference}" not found.`);
+}
+
+function getModuleAlias(module: LocalHabitatModule, modules: LocalHabitatModule[]): string {
+  const aliasBase = buildAliasBase(module.displayName, module.blueprintId);
+  const matchingModules = modules.filter(
+    (item) => buildAliasBase(item.displayName, item.blueprintId) === aliasBase,
+  );
+  const position = matchingModules.findIndex((item) => item.id === module.id);
+  return `${aliasBase}-${position + 1}`;
+}
+
+function buildAliasBase(displayName: string, blueprintId: string): string {
+  const blueprintTokens = blueprintId
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+
+  if (blueprintTokens.length >= 2) {
+    return blueprintTokens.map((token) => token[0]).join("");
+  }
+
+  const nameTokens = displayName
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(Boolean);
+
+  if (nameTokens.length >= 2) {
+    return nameTokens.map((token) => token[0]).join("");
+  }
+
+  const singleToken = nameTokens[0] ?? blueprintTokens[0] ?? "mod";
+  return singleToken.slice(0, 3);
+}
+
+function hydrateStarterModule(module: StarterModuleInstance): LocalHabitatModule {
+  return {
+    id: module.id,
+    blueprintId: module.blueprintId,
+    displayName: module.displayName,
+    connectedTo: Array.isArray(module.connectedTo) ? module.connectedTo : [],
+    runtimeAttributes:
+      module.runtimeAttributes && typeof module.runtimeAttributes === "object"
+        ? module.runtimeAttributes
+        : {},
+    capabilities: Array.isArray(module.capabilities) ? module.capabilities : [],
+    source: "registration",
+  };
+}
+
+function indexBlueprintsById(blueprints: StoredBlueprint[]): Record<string, StoredBlueprint> {
+  return Object.fromEntries(blueprints.map((blueprint) => [blueprint.blueprintId, blueprint]));
 }
 
 function normalizeBaseUrl(value: string): string {
@@ -171,6 +432,21 @@ function getRegistrationPath(cwd: string): string {
   return path.join(getHabitatDirectory(cwd), REGISTRATION_FILE);
 }
 
+function getModulesPath(cwd: string): string {
+  return path.join(getHabitatDirectory(cwd), MODULES_FILE);
+}
+
+function getBlueprintsPath(cwd: string): string {
+  return path.join(getHabitatDirectory(cwd), BLUEPRINTS_FILE);
+}
+
+function ensureHabitatDirectory(cwd: string): void {
+  const habitatDirectory = getHabitatDirectory(cwd);
+  if (!existsSync(habitatDirectory)) {
+    mkdirSync(habitatDirectory, { recursive: true });
+  }
+}
+
 function readStoredRegistration(cwd: string): RegistrationRecord | null {
   const registrationPath = getRegistrationPath(cwd);
   if (!existsSync(registrationPath)) {
@@ -183,25 +459,56 @@ function readStoredRegistration(cwd: string): RegistrationRecord | null {
 function requireStoredRegistration(cwd: string): RegistrationRecord {
   const registration = readStoredRegistration(cwd);
   if (!registration) {
-    throw new CliError("No local habitat registration found. Run `habitat register --name \"<name>\"` first.");
+    throw new CliError(
+      'No local habitat registration found. Run `habitat register --name "<name>"` first.',
+    );
   }
 
   return registration;
 }
 
 function writeStoredRegistration(cwd: string, registration: RegistrationRecord): void {
-  const habitatDirectory = getHabitatDirectory(cwd);
-  if (!existsSync(habitatDirectory)) {
-    mkdirSync(habitatDirectory, { recursive: true });
-  }
-
+  ensureHabitatDirectory(cwd);
   writeFileSync(getRegistrationPath(cwd), `${JSON.stringify(registration, null, 2)}\n`);
 }
 
-function deleteStoredRegistration(cwd: string): void {
-  const registrationPath = getRegistrationPath(cwd);
-  if (existsSync(registrationPath)) {
-    rmSync(registrationPath, { force: true });
+function readStoredModules(cwd: string): LocalHabitatModule[] {
+  const modulesPath = getModulesPath(cwd);
+  if (!existsSync(modulesPath)) {
+    return [];
+  }
+
+  return JSON.parse(readFileSync(modulesPath, "utf8")) as LocalHabitatModule[];
+}
+
+function writeStoredModules(cwd: string, modules: LocalHabitatModule[]): void {
+  ensureHabitatDirectory(cwd);
+  writeFileSync(getModulesPath(cwd), `${JSON.stringify(modules, null, 2)}\n`);
+}
+
+function readStoredBlueprints(cwd: string): Record<string, StoredBlueprint> {
+  const blueprintsPath = getBlueprintsPath(cwd);
+  if (!existsSync(blueprintsPath)) {
+    return {};
+  }
+
+  return JSON.parse(readFileSync(blueprintsPath, "utf8")) as Record<string, StoredBlueprint>;
+}
+
+function writeStoredBlueprints(cwd: string, blueprints: Record<string, StoredBlueprint>): void {
+  ensureHabitatDirectory(cwd);
+  writeFileSync(getBlueprintsPath(cwd), `${JSON.stringify(blueprints, null, 2)}\n`);
+}
+
+function deleteStoredState(cwd: string): void {
+  for (const filePath of [
+    getRegistrationPath(cwd),
+    getModulesPath(cwd),
+    getBlueprintsPath(cwd),
+  ]) {
+    if (existsSync(filePath)) {
+      rmSync(filePath, { force: true });
+    }
   }
 }
 

@@ -1,4 +1,28 @@
-import { formatModuleListEntry, type LocalHabitatModule, type OfficialResource, type StoredBlueprint } from "../kepler";
+import {
+  type ActiveConstructionJob,
+  formatModuleListEntry,
+  type ConstructionPlan,
+  type LocalInventoryEntry,
+  type LocalHabitatModule,
+  type OfficialResource,
+  type StartedConstruction,
+  type StoredBlueprint,
+} from "../kepler";
+
+function printAlignedTable(headers: string[], rows: string[][]): void {
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => (row[index] ?? "").length)),
+  );
+
+  const formatRow = (row: string[]) =>
+    row.map((cell, index) => cell.padEnd(widths[index] ?? cell.length)).join("  ").trimEnd();
+
+  console.log(formatRow(headers));
+  console.log(widths.map((width) => "-".repeat(width)).join("  "));
+  for (const row of rows) {
+    console.log(formatRow(row));
+  }
+}
 
 export function printRegistrationSuccess(result: {
   registration: {
@@ -53,11 +77,22 @@ export function printTickResult(result: {
     id: string;
     currentEnergyKwh: number;
   }>;
+  completedConstructions: Array<{
+    fabricatorId: string;
+    outputModuleId: string;
+    blueprintId: string;
+  }>;
 }, count: number): void {
   console.log(`startTick: ${result.startTick}`);
   console.log(`endTick: ${result.endTick}`);
   console.log(`ticksAdvanced: ${count}`);
   console.log(`totalEnergyUsedKwh: ${result.totalEnergyUsedKwh}`);
+
+  for (const completed of result.completedConstructions) {
+    console.log(
+      `constructionCompleted: ${completed.outputModuleId} (${completed.blueprintId}) via ${completed.fabricatorId}`,
+    );
+  }
 
   if (result.batteries.length === 0) {
     console.log("batteries: (none)");
@@ -84,7 +119,8 @@ export function printModuleList(modules: LocalHabitatModule[]): void {
 export function printModuleStatus(result: {
   rows: Array<{
     displayName: string;
-    status: string;
+    declaredStatus: string;
+    effectiveState: string;
     currentPowerDrawKw: number;
   }>;
   totalCurrentPowerDrawKw: number;
@@ -95,11 +131,15 @@ export function printModuleStatus(result: {
     return;
   }
 
-  console.log("Module Name | Runtime State | Current Power Draw (kW)");
-  console.log("----------- | ------------- | -----------------------");
-  for (const row of result.rows) {
-    console.log(`${row.displayName} | ${row.status} | ${row.currentPowerDrawKw}`);
-  }
+  printAlignedTable(
+    ["Module Name", "Declared Status", "Effective State", "Current Power Draw (kW)"],
+    result.rows.map((row) => [
+      row.displayName,
+      row.declaredStatus,
+      row.effectiveState,
+      String(row.currentPowerDrawKw),
+    ]),
+  );
   console.log(`totalCurrentPowerDrawKw: ${result.totalCurrentPowerDrawKw}`);
   console.log(`oneTickEnergyCostKwh: ${result.oneTickEnergyCostKwh}`);
 }
@@ -109,13 +149,58 @@ export function printModuleDetails(
   modules: LocalHabitatModule[],
   blueprint: StoredBlueprint | null,
 ): void {
-  console.log(`alias: ${formatModuleListEntry(module, modules).split(" | ")[0]}`);
+  const alias = formatModuleListEntry(module, modules).split(" | ")[0];
+  const declaredStatus =
+    typeof module.runtimeAttributes.status === "string"
+      ? module.runtimeAttributes.status
+      : "(unset)";
+  const effectiveState = module.runtimeAttributes.constructionJob ? "busy" : declaredStatus;
+  const constructionJob =
+    module.runtimeAttributes.constructionJob
+    && typeof module.runtimeAttributes.constructionJob === "object"
+    && !Array.isArray(module.runtimeAttributes.constructionJob)
+      ? module.runtimeAttributes.constructionJob as Record<string, unknown>
+      : null;
+  const batteryDetailKeys = ["currentEnergyKwh", "energyStorageKwh", "reserveKwh", "maxPowerOutputKw"];
+  const completedModuleKeys = [
+    "powerGenerationKw",
+    "degradedStormGenerationKw",
+    "maintenanceHoursPer100Ticks",
+    "surfaceAreaM2",
+  ];
+
+  console.log(`alias: ${alias}`);
   console.log(`id: ${module.id}`);
   console.log(`blueprintId: ${module.blueprintId}`);
   console.log(`displayName: ${module.displayName}`);
   console.log(`source: ${module.source}`);
+  console.log(`declaredStatus: ${declaredStatus}`);
+  console.log(`effectiveState: ${effectiveState}`);
   console.log(`connectedTo: ${JSON.stringify(module.connectedTo)}`);
   console.log(`capabilities: ${JSON.stringify(module.capabilities)}`);
+
+  if (constructionJob) {
+    console.log("activeConstructionJob:");
+    console.log(`  blueprintId: ${String(constructionJob.blueprintId ?? "(unknown)")}`);
+    console.log(`  outputModuleId: ${String(constructionJob.outputModuleId ?? "(unknown)")}`);
+    console.log(`  buildTicks: ${String(constructionJob.buildTicks ?? "(unknown)")}`);
+    console.log(`  remainingTicks: ${String(constructionJob.remainingBuildTicks ?? "(unknown)")}`);
+  }
+
+  const batteryDetails = batteryDetailKeys.filter((key) => typeof module.runtimeAttributes[key] === "number");
+  if (batteryDetails.length > 0) {
+    console.log("battery:");
+    for (const key of batteryDetails) {
+      console.log(`  ${key}: ${String(module.runtimeAttributes[key])}`);
+    }
+  }
+
+  for (const key of completedModuleKeys) {
+    if (typeof module.runtimeAttributes[key] === "number") {
+      console.log(`${key}: ${String(module.runtimeAttributes[key])}`);
+    }
+  }
+
   console.log(`runtimeAttributes: ${JSON.stringify(module.runtimeAttributes)}`);
 
   if (!blueprint) {
@@ -138,13 +223,15 @@ export function printBlueprintList(result: {
     return;
   }
 
-  console.log("Blueprint ID | Display Name | Status | Build Ticks");
-  console.log("------------ | ------------ | ------ | -----------");
-  for (const blueprint of result.blueprints) {
-    console.log(
-      `${blueprint.blueprintId} | ${blueprint.displayName} | ${blueprint.status} | ${blueprint.buildTicks}`,
-    );
-  }
+  printAlignedTable(
+    ["Blueprint ID", "Display Name", "Status", "Build Ticks"],
+    result.blueprints.map((blueprint) => [
+      blueprint.blueprintId,
+      blueprint.displayName,
+      blueprint.status,
+      String(blueprint.buildTicks),
+    ]),
+  );
   console.log(`catalogVersion: ${result.catalogVersion}`);
 }
 
@@ -183,6 +270,65 @@ export function printBlueprintDetails(blueprint: StoredBlueprint): void {
   }
 }
 
+export function printConstructionPlan(plan: ConstructionPlan): void {
+  console.log(`requiredFacilityExists: ${plan.requiredFacility.exists ? "yes" : "no"}`);
+  console.log(`fabricatorAvailable: ${plan.fabricator.available ? "yes" : "no"}`);
+  console.log(`supplyCacheOnline: ${plan.supplyCache.online ? "yes" : "no"}`);
+  console.log(`prerequisitesMet: ${plan.prerequisites.met ? "yes" : "no"}`);
+  console.log(`inventorySufficient: ${plan.inventory.sufficient ? "yes" : "no"}`);
+  console.log(`wouldCreateModule: ${plan.wouldCreateModule.displayName}`);
+  console.log(`resourcesToSpend: ${JSON.stringify(plan.resourcesToSpend)}`);
+  console.log(`canStart: ${plan.canStart ? "yes" : "no"}`);
+
+  if (plan.blockingReasons.length === 0) {
+    return;
+  }
+
+  console.log("blockingReasons:");
+  for (const reason of plan.blockingReasons) {
+    console.log(`- ${reason}`);
+  }
+}
+
+export function printConstructionStarted(result: StartedConstruction): void {
+  console.log(`Started construction for blueprint "${result.blueprintId}".`);
+  console.log(`fabricatorId: ${result.fabricatorId}`);
+  console.log(`outputModuleId: ${result.outputModuleId}`);
+  console.log(`buildTicks: ${result.buildTicks}`);
+  console.log(`remainingBuildTicks: ${result.remainingBuildTicks}`);
+}
+
+export function printConstructionStatus(jobs: ActiveConstructionJob[]): void {
+  if (jobs.length === 0) {
+    console.log("No active construction jobs.");
+    return;
+  }
+
+  for (const [index, job] of jobs.entries()) {
+    if (index > 0) {
+      console.log("");
+    }
+
+    console.log(`fabricator: ${job.fabricatorAlias} (${job.fabricatorId})`);
+    console.log(`blueprintId: ${job.blueprintId}`);
+    console.log(`outputModuleId: ${job.outputModuleId}`);
+    console.log(`buildTicks: ${job.buildTicks}`);
+    console.log(`remainingTicks: ${job.remainingTicks}`);
+  }
+}
+
+export function printInventoryList(entries: LocalInventoryEntry[]): void {
+  if (entries.length === 0) {
+    console.log("No inventory found.");
+    return;
+  }
+
+  printAlignedTable(
+    ["Resource Type", "Quantity"],
+    entries.map((entry) => [entry.resourceType, String(entry.quantity)]),
+  );
+}
+
 export function printResourceList(result: {
   catalogVersion: string;
   resources: OfficialResource[];
@@ -192,13 +338,19 @@ export function printResourceList(result: {
     return;
   }
 
-  console.log("Resource Type | Display Name | Kind | Rarity | Unit");
-  console.log("------------- | ------------ | ---- | ------ | ----");
-  for (const resource of result.resources) {
-    console.log(
-      `${resource.resourceType} | ${resource.displayName} | ${resource.kind} | ${resource.rarity} | ${resource.unit ?? "(none)"}`,
-    );
-  }
+  const sortedResources = [...result.resources].sort((left, right) =>
+    left.kind.localeCompare(right.kind) || left.displayName.localeCompare(right.displayName),
+  );
+  printAlignedTable(
+    ["Resource Type", "Display Name", "Kind", "Rarity", "Unit"],
+    sortedResources.map((resource) => [
+      resource.resourceType,
+      resource.displayName,
+      resource.kind,
+      resource.rarity,
+      resource.unit ?? "(none)",
+    ]),
+  );
   console.log(`catalogVersion: ${result.catalogVersion}`);
   console.log("resource catalog: possible resource types in the Kepler world");
   console.log("local inventory: resources your habitat owns, handled later");

@@ -138,10 +138,86 @@ export type TickBatterySummary = {
   currentEnergyKwh: number;
 };
 
+export type CompletedConstruction = {
+  fabricatorId: string;
+  outputModuleId: string;
+  blueprintId: string;
+};
+
 export type ModulePowerStatusRow = {
   displayName: string;
-  status: ModuleRuntimeStatus;
+  declaredStatus: string;
+  effectiveState: ModuleRuntimeStatus | "busy";
   currentPowerDrawKw: number;
+};
+
+export type ConstructionMaterialMap = Record<string, number>;
+export type LocalInventoryEntry = {
+  resourceType: string;
+  quantity: number;
+};
+
+export type ConstructionPlan = {
+  blueprint: StoredBlueprint;
+  requiredFacility: {
+    exists: boolean;
+    moduleId: string | null;
+    blueprintId: string | null;
+  };
+  fabricator: {
+    available: boolean;
+    moduleId: string | null;
+    status: string | null;
+  };
+  supplyCache: {
+    online: boolean;
+    moduleId: string | null;
+    status: string | null;
+  };
+  prerequisites: {
+    met: boolean;
+    required: string[];
+    missing: string[];
+  };
+  inventory: {
+    sufficient: boolean;
+    available: ConstructionMaterialMap;
+    shortfalls: Array<{
+      resourceType: string;
+      need: number;
+      have: number;
+    }>;
+  };
+  wouldCreateModule: {
+    blueprintId: string;
+    displayName: string;
+  };
+  resourcesToSpend: ConstructionMaterialMap;
+  canStart: boolean;
+  blockingReasons: string[];
+};
+
+export type StartedConstruction = {
+  blueprintId: string;
+  fabricatorId: string;
+  outputModuleId: string;
+  buildTicks: number;
+  remainingBuildTicks: number;
+  jobId: string;
+};
+
+export type ActiveConstructionJob = {
+  fabricatorId: string;
+  fabricatorAlias: string;
+  blueprintId: string;
+  outputModuleId: string;
+  buildTicks: number;
+  remainingTicks: number;
+};
+
+export type CanceledConstruction = {
+  fabricatorId: string;
+  fabricatorAlias: string;
 };
 
 const DEFAULT_BASE_URL = "https://planet.turingguild.com";
@@ -149,6 +225,7 @@ const HABITAT_DIRECTORY = ".habitat";
 const REGISTRATION_FILE = "registration.json";
 const MODULES_FILE = "modules.json";
 const BLUEPRINTS_FILE = "blueprints.json";
+const INVENTORY_FILE = "inventory.json";
 const STATE_FILE = "state.json";
 
 export class CliError extends Error {
@@ -442,6 +519,7 @@ export function runPowerTicks(
   endTick: number;
   totalEnergyUsedKwh: number;
   batteries: TickBatterySummary[];
+  completedConstructions: CompletedConstruction[];
 } {
   requireStoredRegistration(config.cwd);
 
@@ -453,6 +531,7 @@ export function runPowerTicks(
   const state = readTickState(config.cwd);
   const startTick = state.currentTick;
   let totalEnergyUsedKwh = 0;
+  const completedConstructions: CompletedConstruction[] = [];
 
   for (let tick = 0; tick < count; tick += 1) {
     const tickEnergyUsedKwh = modules.reduce(
@@ -461,6 +540,9 @@ export function runPowerTicks(
     );
 
     drainBatteries(modules, tickEnergyUsedKwh);
+    if (hasUsablePower(modules)) {
+      completedConstructions.push(...advanceConstructionJobs(modules));
+    }
     totalEnergyUsedKwh += tickEnergyUsedKwh;
     state.currentTick += 1;
   }
@@ -481,6 +563,7 @@ export function runPowerTicks(
     endTick: state.currentTick,
     totalEnergyUsedKwh,
     batteries,
+    completedConstructions,
   };
 }
 
@@ -501,12 +584,17 @@ export function getModulePowerStatus(
   requireStoredRegistration(config.cwd);
   const modules = readStoredModules(config.cwd);
   const rows = modules.map((module) => {
-    const status = getDisplayedModuleStatus(module);
+    const declaredStatus =
+      typeof module.runtimeAttributes.status === "string"
+        ? module.runtimeAttributes.status
+        : "(unset)";
+    const effectiveState = getEffectiveModuleState(module);
     const currentPowerDrawKw = getModuleCurrentPowerDrawKw(module);
 
     return {
       displayName: module.displayName,
-      status,
+      declaredStatus,
+      effectiveState,
       currentPowerDrawKw,
     };
   });
@@ -517,6 +605,308 @@ export function getModulePowerStatus(
     rows,
     totalCurrentPowerDrawKw,
     oneTickEnergyCostKwh: totalCurrentPowerDrawKw / 3600,
+  };
+}
+
+export function planConstruction(config: CliConfig, blueprintId: string): ConstructionPlan {
+  requireStoredRegistration(config.cwd);
+  const blueprints = readStoredBlueprints(config.cwd);
+  const blueprint = blueprints[blueprintId];
+
+  if (!blueprint) {
+    throw new CliError(`Blueprint "${blueprintId}" was not found in local habitat blueprints.`);
+  }
+
+  return buildConstructionPlan(config.cwd, blueprint);
+}
+
+export async function startConstruction(
+  config: CliConfig,
+  blueprintId: string,
+): Promise<StartedConstruction> {
+  requireStoredRegistration(config.cwd);
+  const blueprint = await getOfficialBlueprint(config, blueprintId);
+  const plan = buildConstructionPlan(config.cwd, blueprint);
+
+  if (!plan.canStart) {
+    throw new CliError(plan.blockingReasons[0] ?? "Construction cannot start.");
+  }
+
+  const modules = readStoredModules(config.cwd);
+  const inventory = readStoredInventory(config.cwd);
+  const fabricator = modules.find((module) => module.id === plan.fabricator.moduleId);
+
+  if (!fabricator) {
+    throw new CliError("Construction fabricator disappeared before the job could be created.");
+  }
+
+  for (const [resourceType, amount] of Object.entries(plan.resourcesToSpend)) {
+    inventory[resourceType] = (inventory[resourceType] ?? 0) - amount;
+  }
+
+  const outputModuleId = generateOutputModuleId(modules, blueprint.blueprintId);
+  const jobId = generateConstructionJobId(modules, blueprint.blueprintId);
+
+  fabricator.runtimeAttributes.status = "active";
+  fabricator.runtimeAttributes.constructionJobId = jobId;
+  fabricator.runtimeAttributes.constructionJob = {
+    id: jobId,
+    blueprintId: blueprint.blueprintId,
+    outputModuleId,
+    buildTicks: blueprint.buildTicks,
+    remainingBuildTicks: blueprint.buildTicks,
+    futureDisplayName: blueprint.displayName,
+    futureRuntimeAttributes:
+      blueprint.runtimeAttributes && typeof blueprint.runtimeAttributes === "object"
+        ? blueprint.runtimeAttributes
+        : {},
+    futureCapabilities: Array.isArray(blueprint.capabilities) ? blueprint.capabilities : [],
+  };
+
+  writeStoredInventory(config.cwd, inventory);
+  writeStoredModules(config.cwd, modules);
+
+  return {
+    blueprintId: blueprint.blueprintId,
+    fabricatorId: fabricator.id,
+    outputModuleId,
+    buildTicks: blueprint.buildTicks,
+    remainingBuildTicks: blueprint.buildTicks,
+    jobId,
+  };
+}
+
+export function addInventoryResource(
+  config: CliConfig,
+  resourceType: string,
+  quantity: number,
+): LocalInventoryEntry {
+  requireStoredRegistration(config.cwd);
+
+  if (!resourceType.trim()) {
+    throw new CliError("Invalid resource type. Use a non-empty resource type string.");
+  }
+
+  if (!Number.isInteger(quantity) || quantity <= 0) {
+    throw new CliError(`Invalid quantity "${quantity}". Use a positive integer.`);
+  }
+
+  const inventory = readStoredInventory(config.cwd);
+  inventory[resourceType] = (inventory[resourceType] ?? 0) + quantity;
+  writeStoredInventory(config.cwd, inventory);
+
+  return {
+    resourceType,
+    quantity: inventory[resourceType],
+  };
+}
+
+export function listInventory(config: CliConfig): LocalInventoryEntry[] {
+  requireStoredRegistration(config.cwd);
+
+  return Object.entries(readStoredInventory(config.cwd))
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([resourceType, quantity]) => ({
+      resourceType,
+      quantity,
+    }));
+}
+
+export function listActiveConstructionJobs(config: CliConfig): ActiveConstructionJob[] {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+
+  return modules
+    .flatMap((module) => {
+      const job = module.runtimeAttributes.constructionJob;
+      if (!job || typeof job !== "object" || Array.isArray(job)) {
+        return [];
+      }
+
+      const record = job as Record<string, unknown>;
+      const blueprintId = record.blueprintId;
+      const outputModuleId = record.outputModuleId;
+      const buildTicks = record.buildTicks;
+      const remainingTicks = record.remainingBuildTicks;
+
+      if (
+        typeof blueprintId !== "string"
+        || typeof outputModuleId !== "string"
+        || typeof buildTicks !== "number"
+        || typeof remainingTicks !== "number"
+      ) {
+        return [];
+      }
+
+      return [{
+        fabricatorId: module.id,
+        fabricatorAlias: getModuleAlias(module, modules),
+        blueprintId,
+        outputModuleId,
+        buildTicks,
+        remainingTicks,
+      }];
+    });
+}
+
+export function cancelConstructionJob(
+  config: CliConfig,
+  moduleReference: string,
+): CanceledConstruction {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+  const module = resolveModuleReferenceFromModules(modules, moduleReference);
+
+  const job = module.runtimeAttributes.constructionJob;
+  if (!job || typeof job !== "object" || Array.isArray(job)) {
+    throw new CliError(`Module "${moduleReference}" does not have an active construction job.`);
+  }
+
+  const alias = getModuleAlias(module, modules);
+  delete module.runtimeAttributes.constructionJob;
+  delete module.runtimeAttributes.constructionJobId;
+  module.runtimeAttributes.status = "idle";
+  writeStoredModules(config.cwd, modules);
+
+  return {
+    fabricatorId: module.id,
+    fabricatorAlias: alias,
+  };
+}
+
+function buildConstructionPlan(cwd: string, blueprint: StoredBlueprint): ConstructionPlan {
+  const modules = readStoredModules(cwd);
+  const inventory = readStoredInventory(cwd);
+
+  const resourcesToSpend = getBlueprintInputResources(blueprint);
+  const requiredFacilityBlueprintId = getRequiredFacilityBlueprintId(blueprint);
+  const facilityModule =
+    requiredFacilityBlueprintId === null
+      ? null
+      : modules.find((module) => module.blueprintId === requiredFacilityBlueprintId) ?? null;
+  const facilityStatus = facilityModule ? getDisplayedModuleStatus(facilityModule) : null;
+  const facilityBusy = facilityModule
+    ? Boolean(
+      facilityModule.runtimeAttributes.constructionJobId ?? facilityModule.runtimeAttributes.busy,
+    )
+    : false;
+
+  const supplyCacheModule =
+    modules.find((module) =>
+      module.blueprintId === "supply-cache"
+      || module.capabilities.includes("storage")
+      || module.capabilities.includes("logistics")
+    ) ?? null;
+  const supplyCacheStatus = supplyCacheModule ? getDisplayedModuleStatus(supplyCacheModule) : null;
+  const supplyCacheOnline =
+    supplyCacheModule !== null
+    && (supplyCacheStatus === "online" || supplyCacheStatus === "idle" || supplyCacheStatus === "active");
+
+  const requiredPrerequisites = Array.isArray(blueprint.prerequisites) ? blueprint.prerequisites : [];
+  const missingPrerequisites = requiredPrerequisites.filter((requirement) =>
+    !modules.some((module) =>
+      module.blueprintId === requirement || module.capabilities.includes(requirement)
+    )
+  );
+
+  const inventoryAvailable = Object.fromEntries(
+    Object.keys(resourcesToSpend).map((resourceType) => [resourceType, inventory[resourceType] ?? 0]),
+  );
+  const shortfalls = Object.entries(resourcesToSpend)
+    .map(([resourceType, need]) => ({
+      resourceType,
+      need,
+      have: inventory[resourceType] ?? 0,
+    }))
+    .filter((entry) => entry.have < entry.need);
+
+  const blockingReasons: string[] = [];
+
+  if (blueprint.status !== "published") {
+    blockingReasons.push("blueprint is not published");
+  }
+
+  if (blueprint.output.itemType !== "module") {
+    blockingReasons.push("blueprint does not create a module");
+  }
+
+  if (requiredFacilityBlueprintId && !facilityModule) {
+    blockingReasons.push(`required construction facility "${requiredFacilityBlueprintId}" does not exist`);
+  }
+
+  if (facilityModule && facilityBusy) {
+    blockingReasons.push("required construction facility is busy");
+  }
+
+  if (
+    facilityModule
+    && !facilityBusy
+    && facilityStatus !== "online"
+    && facilityStatus !== "idle"
+    && facilityStatus !== "active"
+  ) {
+    blockingReasons.push("required construction facility is offline");
+  }
+
+  if (!supplyCacheModule) {
+    blockingReasons.push("supply cache is missing");
+  } else if (!supplyCacheOnline) {
+    blockingReasons.push("supply cache is offline");
+  }
+
+  if (missingPrerequisites.length > 0) {
+    blockingReasons.push(`missing prerequisites: ${missingPrerequisites.join(", ")}`);
+  }
+
+  for (const shortfall of shortfalls) {
+    blockingReasons.push(
+      `inventory shortfall: ${shortfall.resourceType} need=${shortfall.need} have=${shortfall.have}`,
+    );
+  }
+
+  if (!hasUsablePower(modules)) {
+    blockingReasons.push(
+      "construction cannot start or advance until a usable battery or power source is online",
+    );
+  }
+
+  return {
+    blueprint,
+    requiredFacility: {
+      exists: facilityModule !== null,
+      moduleId: facilityModule?.id ?? null,
+      blueprintId: requiredFacilityBlueprintId,
+    },
+    fabricator: {
+      available:
+        facilityModule !== null
+        && !facilityBusy
+        && (facilityStatus === "online" || facilityStatus === "idle" || facilityStatus === "active"),
+      moduleId: facilityModule?.id ?? null,
+      status: facilityStatus,
+    },
+    supplyCache: {
+      online: supplyCacheOnline,
+      moduleId: supplyCacheModule?.id ?? null,
+      status: supplyCacheStatus,
+    },
+    prerequisites: {
+      met: missingPrerequisites.length === 0,
+      required: requiredPrerequisites,
+      missing: missingPrerequisites,
+    },
+    inventory: {
+      sufficient: shortfalls.length === 0,
+      available: inventoryAvailable,
+      shortfalls,
+    },
+    wouldCreateModule: {
+      blueprintId: blueprint.blueprintId,
+      displayName: blueprint.displayName,
+    },
+    resourcesToSpend,
+    canStart: blockingReasons.length === 0,
+    blockingReasons,
   };
 }
 
@@ -562,6 +952,11 @@ function resolveModuleReferenceFromModules(
     return aliasMatch;
   }
 
+  const generatedNameMatch = modules.find((item) => getModuleGeneratedName(item, modules) === reference);
+  if (generatedNameMatch) {
+    return generatedNameMatch;
+  }
+
   throw new CliError(`Module "${reference}" not found.`);
 }
 
@@ -572,6 +967,12 @@ function getModuleAlias(module: LocalHabitatModule, modules: LocalHabitatModule[
   );
   const position = matchingModules.findIndex((item) => item.id === module.id);
   return `${aliasBase}-${position + 1}`;
+}
+
+function getModuleGeneratedName(module: LocalHabitatModule, modules: LocalHabitatModule[]): string {
+  const matchingModules = modules.filter((item) => item.blueprintId === module.blueprintId);
+  const position = matchingModules.findIndex((item) => item.id === module.id);
+  return `${module.blueprintId}-${position + 1}`;
 }
 
 function buildAliasBase(displayName: string, blueprintId: string): string {
@@ -636,6 +1037,10 @@ function getBlueprintsPath(cwd: string): string {
   return path.join(getHabitatDirectory(cwd), BLUEPRINTS_FILE);
 }
 
+function getInventoryPath(cwd: string): string {
+  return path.join(getHabitatDirectory(cwd), INVENTORY_FILE);
+}
+
 function getStatePath(cwd: string): string {
   return path.join(getHabitatDirectory(cwd), STATE_FILE);
 }
@@ -695,6 +1100,20 @@ function readStoredBlueprints(cwd: string): Record<string, StoredBlueprint> {
   return JSON.parse(readFileSync(blueprintsPath, "utf8")) as Record<string, StoredBlueprint>;
 }
 
+function readStoredInventory(cwd: string): ConstructionMaterialMap {
+  const inventoryPath = getInventoryPath(cwd);
+  if (!existsSync(inventoryPath)) {
+    return {};
+  }
+
+  return JSON.parse(readFileSync(inventoryPath, "utf8")) as ConstructionMaterialMap;
+}
+
+function writeStoredInventory(cwd: string, inventory: ConstructionMaterialMap): void {
+  ensureHabitatDirectory(cwd);
+  writeFileSync(getInventoryPath(cwd), `${JSON.stringify(inventory, null, 2)}\n`);
+}
+
 function writeStoredBlueprints(cwd: string, blueprints: Record<string, StoredBlueprint>): void {
   ensureHabitatDirectory(cwd);
   writeFileSync(getBlueprintsPath(cwd), `${JSON.stringify(blueprints, null, 2)}\n`);
@@ -710,6 +1129,7 @@ function deleteStoredState(cwd: string): void {
     getRegistrationPath(cwd),
     getModulesPath(cwd),
     getBlueprintsPath(cwd),
+    getInventoryPath(cwd),
     getStatePath(cwd),
   ]) {
     if (existsSync(filePath)) {
@@ -753,6 +1173,115 @@ function drainBatteries(modules: LocalHabitatModule[], energyUsedKwh: number): v
     const drained = energyUsedKwh * share;
     battery.runtimeAttributes.currentEnergyKwh = Math.max(0, currentEnergy - drained);
   }
+}
+
+function getBlueprintInputResources(blueprint: StoredBlueprint): ConstructionMaterialMap {
+  if (!blueprint.inputs || typeof blueprint.inputs !== "object" || Array.isArray(blueprint.inputs)) {
+    return {};
+  }
+
+  return Object.fromEntries(
+    Object.entries(blueprint.inputs).filter(([, amount]) => typeof amount === "number"),
+  );
+}
+
+function getRequiredFacilityBlueprintId(blueprint: StoredBlueprint): string | null {
+  const moduleType = blueprint.requiredFacility?.moduleType;
+  return typeof moduleType === "string" && moduleType.length > 0 ? moduleType : null;
+}
+
+function hasUsablePower(modules: LocalHabitatModule[]): boolean {
+  return modules.some((module) =>
+    isBatteryModule(module)
+    && getDisplayedModuleStatus(module) !== "offline"
+    && getBatteryEnergy(module) > 0
+  );
+}
+
+function generateOutputModuleId(modules: LocalHabitatModule[], blueprintId: string): string {
+  const prefix = `module-${blueprintId}-`;
+  const nextIndex =
+    modules.filter((module) => module.id.startsWith(prefix)).length + 1;
+  return `${prefix}${nextIndex}`;
+}
+
+function generateConstructionJobId(modules: LocalHabitatModule[], blueprintId: string): string {
+  const prefix = `job-${blueprintId}-`;
+  const nextIndex = modules.reduce((count, module) => {
+    const jobId = module.runtimeAttributes.constructionJobId;
+    return typeof jobId === "string" && jobId.startsWith(prefix) ? count + 1 : count;
+  }, 1);
+
+  return `${prefix}${nextIndex}`;
+}
+
+function advanceConstructionJobs(modules: LocalHabitatModule[]): CompletedConstruction[] {
+  const completed: CompletedConstruction[] = [];
+
+  for (const module of modules) {
+    const job = module.runtimeAttributes.constructionJob;
+    if (!job || typeof job !== "object" || Array.isArray(job)) {
+      continue;
+    }
+
+    const record = job as Record<string, unknown>;
+    const remainingBuildTicks = record.remainingBuildTicks;
+
+    if (typeof remainingBuildTicks !== "number" || remainingBuildTicks <= 0) {
+      continue;
+    }
+
+    record.remainingBuildTicks = remainingBuildTicks - 1;
+
+    if (record.remainingBuildTicks !== 0) {
+      continue;
+    }
+
+    const outputModule = createCompletedModuleFromJob(record);
+    modules.push(outputModule);
+    delete module.runtimeAttributes.constructionJob;
+    delete module.runtimeAttributes.constructionJobId;
+    module.runtimeAttributes.status = "idle";
+
+    completed.push({
+      fabricatorId: module.id,
+      outputModuleId: outputModule.id,
+      blueprintId: outputModule.blueprintId,
+    });
+  }
+
+  return completed;
+}
+
+function createCompletedModuleFromJob(job: Record<string, unknown>): LocalHabitatModule {
+  const outputModuleId = job.outputModuleId;
+  const blueprintId = job.blueprintId;
+  const futureDisplayName = job.futureDisplayName;
+  const futureRuntimeAttributes = job.futureRuntimeAttributes;
+  const futureCapabilities = job.futureCapabilities;
+
+  if (
+    typeof outputModuleId !== "string"
+    || typeof blueprintId !== "string"
+    || typeof futureDisplayName !== "string"
+  ) {
+    throw new CliError("Stored construction job is missing required module details.");
+  }
+
+  return {
+    id: outputModuleId,
+    blueprintId,
+    displayName: futureDisplayName,
+    connectedTo: [],
+    runtimeAttributes:
+      futureRuntimeAttributes && typeof futureRuntimeAttributes === "object" && !Array.isArray(futureRuntimeAttributes)
+        ? futureRuntimeAttributes as RuntimeAttributes
+        : {},
+    capabilities: Array.isArray(futureCapabilities)
+      ? futureCapabilities.filter((value): value is string => typeof value === "string")
+      : [],
+    source: "local",
+  };
 }
 
 function getModuleCurrentPowerDrawKw(module: LocalHabitatModule): number {
@@ -801,6 +1330,16 @@ function getDisplayedModuleStatus(
   }
 
   return "offline";
+}
+
+function getEffectiveModuleState(
+  module: LocalHabitatModule,
+): ModuleRuntimeStatus | "busy" {
+  if (module.runtimeAttributes.constructionJob) {
+    return "busy";
+  }
+
+  return getDisplayedModuleStatus(module);
 }
 
 async function requestJson<T>(

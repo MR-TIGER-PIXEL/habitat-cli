@@ -6,8 +6,11 @@ import {
   createModule,
   deleteModule,
   formatModuleListEntry,
+  getOfficialBlueprint,
   getRegistrationStatus,
   listModules,
+  listOfficialBlueprints,
+  listOfficialResources,
   parseJsonArray,
   parseJsonObject,
   runPowerTicks,
@@ -19,6 +22,7 @@ import {
   updateModule,
   type CliConfig,
   type FetchLike,
+  type StoredBlueprint,
 } from "./kepler";
 
 function createWorkspace(): string {
@@ -39,7 +43,19 @@ function createConfig(cwd: string, fetchImpl: FetchLike): CliConfig {
   };
 }
 
+function createFetchMock(
+  handler: (url: RequestInfo | URL, init?: RequestInit | BunFetchRequestInit) => Promise<Response>,
+): FetchLike {
+  return Object.assign(handler, {
+    preconnect: fetch.preconnect.bind(fetch),
+  }) as FetchLike;
+}
+
 function runCli(cwd: string, ...args: string[]) {
+  return runCliWithEnv(cwd, {}, ...args);
+}
+
+function runCliWithEnv(cwd: string, env: Record<string, string>, ...args: string[]) {
   return Bun.spawnSync({
     cmd: ["bun", path.join(process.cwd(), "habitat"), ...args],
     cwd,
@@ -49,11 +65,48 @@ function runCli(cwd: string, ...args: string[]) {
       ...process.env,
       KEPLER_PLANET_TOKEN: "test-token",
       KEPLER_BASE_URL: "https://planet.turingguild.com",
+      ...env,
     },
   });
 }
 
-function createRegistrationPayload() {
+function runCliWithMockedFetch(
+  cwd: string,
+  fixtures: Record<string, { status: number; body: unknown }>,
+  ...args: string[]
+) {
+  return Bun.spawnSync({
+    cmd: [
+      "bun",
+      "--preload",
+      path.join(process.cwd(), "src/test-cli-fetch-mock.ts"),
+      path.join(process.cwd(), "habitat"),
+      ...args,
+    ],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      KEPLER_PLANET_TOKEN: "test-token",
+      KEPLER_BASE_URL: "https://planet.turingguild.com",
+      HABITAT_TEST_FETCH_FIXTURES: JSON.stringify(fixtures),
+    },
+  });
+}
+
+function createRegistrationPayload(): {
+  habitatId: string;
+  starterModules: Array<{
+    id: string;
+    blueprintId: string;
+    displayName: string;
+    connectedTo: string[];
+    runtimeAttributes: Record<string, unknown>;
+    capabilities: string[];
+  }>;
+  blueprints: StoredBlueprint[];
+} {
   return {
     habitatId: "habitat_11111111_1111_4111_8111_111111111111",
     starterModules: [
@@ -137,12 +190,45 @@ function createRegistrationPayload() {
   };
 }
 
+function createOfficialBlueprintPayload(): StoredBlueprint {
+  return {
+    id: "blueprint-survey-rover",
+    blueprintId: "survey-rover",
+    displayName: "Survey Rover",
+    description: "Builds a compact rover for local site surveys.",
+    status: "published",
+    output: { itemType: "vehicle", vehicleType: "survey-rover", quantity: 1 },
+    inputs: { aluminum: 12, electronics: 6, batteryCells: 4 },
+    productionCost: { energyKwh: 18 },
+    requiredFacility: { moduleType: "workshop-fabricator" },
+    buildTicks: 240,
+    prerequisites: ["rover-bay"],
+    unlocks: ["survey-missions"],
+    repeatable: true,
+    level: 1,
+    runtimeAttributes: { durability: 100 },
+    capabilities: ["survey-sites"],
+  };
+}
+
+function createOfficialResourcePayload() {
+  return {
+    id: "resource-water-ice",
+    resourceType: "water-ice",
+    displayName: "Water Ice",
+    kind: "volatile",
+    rarity: "common",
+    description: "Frozen water that can be processed into life support and fuel inputs.",
+    unit: "kg",
+  };
+}
+
 test("register stores registration, hydrated starter modules, and blueprint lookups", async () => {
   const cwd = createWorkspace();
   const requests: Array<{ url: string; method: string; body?: unknown }> = [];
   const payload = createRegistrationPayload();
 
-  const fetchMock: FetchLike = async (url, init) => {
+  const fetchMock = createFetchMock(async (url, init) => {
     const requestBody = init?.body ? JSON.parse(String(init.body)) : undefined;
     requests.push({
       url: String(url),
@@ -154,7 +240,7 @@ test("register stores registration, hydrated starter modules, and blueprint look
       status: 201,
       headers: { "content-type": "application/json" },
     });
-  };
+  });
 
   const result = await registerHabitat(createConfig(cwd, fetchMock), "Starlight Forge");
 
@@ -227,7 +313,7 @@ test("status includes remote habitat details and local module count", async () =
   );
 
   const requests: string[] = [];
-  const fetchMock: FetchLike = async (url, init) => {
+  const fetchMock = createFetchMock(async (url, init) => {
     requests.push(`${init?.method ?? "GET"} ${String(url)}`);
     return new Response(
       JSON.stringify({
@@ -245,7 +331,7 @@ test("status includes remote habitat details and local module count", async () =
         headers: { "content-type": "application/json" },
       },
     );
-  };
+  });
 
   const result = await getRegistrationStatus(createConfig(cwd, fetchMock));
 
@@ -254,6 +340,112 @@ test("status includes remote habitat details and local module count", async () =
   ]);
   expect(result.habitat.status).toBe("registered");
   expect(result.moduleCount).toBe(6);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("listOfficialBlueprints reads the official Kepler blueprint catalog without touching local state", async () => {
+  const cwd = createWorkspace();
+  const requests: string[] = [];
+  const blueprint = createOfficialBlueprintPayload();
+
+  const fetchMock = createFetchMock(async (url, init) => {
+    requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+    return new Response(
+      JSON.stringify({
+        catalogVersion: "2026-06-24",
+        blueprints: [blueprint],
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  });
+
+  const result = await listOfficialBlueprints(createConfig(cwd, fetchMock));
+
+  expect(requests).toEqual(["GET https://planet.turingguild.com/catalog/blueprints"]);
+  expect(result.catalogVersion).toBe("2026-06-24");
+  expect(result.blueprints).toHaveLength(1);
+  expect(result.blueprints[0]?.blueprintId).toBe("survey-rover");
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("getOfficialBlueprint returns one official blueprint and maps not found to a friendly error", async () => {
+  const cwd = createWorkspace();
+  const requests: string[] = [];
+  const blueprint = createOfficialBlueprintPayload();
+
+  const fetchMock = createFetchMock(async (url, init) => {
+    requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+
+    if (String(url).endsWith("/catalog/blueprints/survey-rover")) {
+      return new Response(JSON.stringify({ blueprint }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }
+
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: "not_found",
+          message: "No blueprint with that id exists.",
+        },
+      }),
+      {
+        status: 404,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  });
+
+  const config = createConfig(cwd, fetchMock);
+  const found = await getOfficialBlueprint(config, "survey-rover");
+  expect(found.blueprintId).toBe("survey-rover");
+
+  await expect(getOfficialBlueprint(config, "missing-blueprint")).rejects.toThrow(
+    'Blueprint "missing-blueprint" was not found in the Kepler catalog.',
+  );
+
+  expect(requests).toEqual([
+    "GET https://planet.turingguild.com/catalog/blueprints/survey-rover",
+    "GET https://planet.turingguild.com/catalog/blueprints/missing-blueprint",
+  ]);
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("listOfficialResources reads the official Kepler resource catalog without touching local state", async () => {
+  const cwd = createWorkspace();
+  const requests: string[] = [];
+  const resource = createOfficialResourcePayload();
+
+  const fetchMock = createFetchMock(async (url, init) => {
+    requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+    return new Response(
+      JSON.stringify({
+        catalogVersion: "2026-06-24",
+        resources: [resource],
+      }),
+      {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  });
+
+  const result = await listOfficialResources(createConfig(cwd, fetchMock));
+
+  expect(requests).toEqual(["GET https://planet.turingguild.com/catalog/resources"]);
+  expect(result.catalogVersion).toBe("2026-06-24");
+  expect(result.resources).toHaveLength(1);
+  expect(result.resources[0]?.resourceType).toBe("water-ice");
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -296,7 +488,7 @@ test("module CRUD works against local hydrated module state", async () => {
     )}\n`,
   );
 
-  const config = createConfig(cwd, async () => new Response(null, { status: 200 }));
+  const config = createConfig(cwd, createFetchMock(async () => new Response(null, { status: 200 })));
 
   const modules = listModules(config);
   expect(modules).toHaveLength(6);
@@ -404,7 +596,10 @@ test("power-only ticks drain battery energy and advance currentTick", async () =
     `${JSON.stringify(starterModules, null, 2)}\n`,
   );
 
-  const result = runPowerTicks(createConfig(cwd, async () => new Response(null, { status: 200 })), 1);
+  const result = runPowerTicks(
+    createConfig(cwd, createFetchMock(async () => new Response(null, { status: 200 }))),
+    1,
+  );
 
   expect(result.startTick).toBe(0);
   expect(result.endTick).toBe(1);
@@ -429,6 +624,122 @@ test("CLI help shows the tick command", () => {
 
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toContain("tick");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("blueprint list prints a concise table of official blueprints", async () => {
+  const cwd = createWorkspace();
+  const blueprint = createOfficialBlueprintPayload();
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/catalog/blueprints": {
+        status: 200,
+        body: {
+          catalogVersion: "2026-06-24",
+          blueprints: [blueprint],
+        },
+      },
+    },
+    "blueprint",
+    "list",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain("Blueprint ID");
+  expect(result.stdout.toString()).toContain("Display Name");
+  expect(result.stdout.toString()).toContain("survey-rover");
+  expect(result.stdout.toString()).toContain("Survey Rover");
+  expect(result.stdout.toString()).toContain("published");
+  expect(result.stdout.toString()).toContain("240");
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("blueprint show prints readable details and reports missing blueprints cleanly", async () => {
+  const cwd = createWorkspace();
+  const blueprint = createOfficialBlueprintPayload();
+  const fixtures = {
+    "GET https://planet.turingguild.com/catalog/blueprints/survey-rover": {
+      status: 200,
+      body: { blueprint },
+    },
+    "GET https://planet.turingguild.com/catalog/blueprints/missing-blueprint": {
+      status: 404,
+      body: {
+        error: {
+          code: "not_found",
+          message: "No blueprint with that id exists.",
+        },
+      },
+    },
+  };
+
+  const shown = runCliWithMockedFetch(cwd, fixtures, "blueprint", "show", "survey-rover");
+  const missing = runCliWithMockedFetch(
+    cwd,
+    fixtures,
+    "blueprint",
+    "show",
+    "missing-blueprint",
+  );
+
+  expect(shown.exitCode).toBe(0);
+  expect(shown.stdout.toString()).toContain("blueprintId: survey-rover");
+  expect(shown.stdout.toString()).toContain("displayName: Survey Rover");
+  expect(shown.stdout.toString()).toContain("status: published");
+  expect(shown.stdout.toString()).toContain("buildTicks: 240");
+  expect(shown.stdout.toString()).toContain("repeatable: yes");
+  expect(shown.stdout.toString()).toContain("inputs:");
+  expect(shown.stdout.toString()).toContain("output:");
+  expect(shown.stdout.toString()).toContain("capabilities:");
+
+  expect(missing.exitCode).toBe(1);
+  expect(missing.stderr.toString()).toContain(
+    'Blueprint "missing-blueprint" was not found in the Kepler catalog.',
+  );
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("resource list prints official resource types and explains the catalog boundary", async () => {
+  const cwd = createWorkspace();
+  const resource = createOfficialResourcePayload();
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/catalog/resources": {
+        status: 200,
+        body: {
+          catalogVersion: "2026-06-24",
+          resources: [resource],
+        },
+      },
+    },
+    "resource",
+    "list",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain("Resource Type");
+  expect(result.stdout.toString()).toContain("Display Name");
+  expect(result.stdout.toString()).toContain("water-ice");
+  expect(result.stdout.toString()).toContain("Water Ice");
+  expect(result.stdout.toString()).toContain("volatile");
+  expect(result.stdout.toString()).toContain("common");
+  expect(result.stdout.toString()).toContain("kg");
+  expect(result.stdout.toString()).toContain("resource catalog: possible resource types in the Kepler world");
+  expect(result.stdout.toString()).toContain(
+    "local inventory: resources your habitat owns, handled later",
+  );
+  expect(result.stdout.toString()).toContain(
+    "blueprint requirements: resources or modules needed to build something later",
+  );
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -579,10 +890,10 @@ test("unregister removes registration, modules, and blueprints files", async () 
   }
 
   const requests: string[] = [];
-  const fetchMock: FetchLike = async (url, init) => {
+  const fetchMock = createFetchMock(async (url, init) => {
     requests.push(`${init?.method ?? "GET"} ${String(url)}`);
     return new Response(null, { status: 204 });
-  };
+  });
 
   const result = await unregisterHabitat(createConfig(cwd, fetchMock));
 

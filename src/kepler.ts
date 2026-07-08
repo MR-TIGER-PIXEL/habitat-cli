@@ -88,6 +88,30 @@ type HabitatResponse = {
   habitat: HabitatDetails;
 };
 
+type BlueprintCatalogResponse = {
+  catalogVersion: string;
+  blueprints: StoredBlueprint[];
+};
+
+type BlueprintResponse = {
+  blueprint: StoredBlueprint;
+};
+
+export type OfficialResource = {
+  id: string;
+  resourceType: string;
+  displayName: string;
+  kind: string;
+  rarity: string;
+  description?: string;
+  unit?: string;
+};
+
+type ResourceCatalogResponse = {
+  catalogVersion: string;
+  resources: OfficialResource[];
+};
+
 export type ModuleCreateInput = {
   id: string;
   blueprintId: string;
@@ -255,6 +279,44 @@ export async function unregisterHabitat(config: CliConfig): Promise<Registration
   });
   deleteStoredState(config.cwd);
   return registration;
+}
+
+export async function listOfficialBlueprints(config: CliConfig): Promise<BlueprintCatalogResponse> {
+  return requestJson<BlueprintCatalogResponse>(config, "/catalog/blueprints", {
+    method: "GET",
+  });
+}
+
+export async function listOfficialResources(config: CliConfig): Promise<ResourceCatalogResponse> {
+  return requestJson<ResourceCatalogResponse>(config, "/catalog/resources", {
+    method: "GET",
+  });
+}
+
+export async function getOfficialBlueprint(
+  config: CliConfig,
+  blueprintId: string,
+): Promise<StoredBlueprint> {
+  try {
+    const response = await requestJson<BlueprintResponse>(
+      config,
+      `/catalog/blueprints/${encodeURIComponent(blueprintId)}`,
+      {
+        method: "GET",
+      },
+    );
+
+    return response.blueprint;
+  } catch (error) {
+    if (
+      error instanceof CliError
+      && (error.message.includes("404") || error.message.includes("No blueprint with that id"))
+    ) {
+      throw new CliError(`Blueprint "${blueprintId}" was not found in the Kepler catalog.`);
+    }
+
+    throw error;
+  }
 }
 
 export function readTickState(cwd: string): TickState {

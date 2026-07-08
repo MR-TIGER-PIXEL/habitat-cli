@@ -10,9 +10,11 @@ import {
   listModules,
   parseJsonArray,
   parseJsonObject,
+  runPowerTicks,
   registerHabitat,
   resolveModuleReference,
   showModule,
+  readTickState,
   unregisterHabitat,
   updateModule,
   type CliConfig,
@@ -35,6 +37,20 @@ function createConfig(cwd: string, fetchImpl: FetchLike): CliConfig {
     cwd,
     fetchImpl,
   };
+}
+
+function runCli(cwd: string, ...args: string[]) {
+  return Bun.spawnSync({
+    cmd: ["bun", path.join(process.cwd(), "habitat"), ...args],
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+    env: {
+      ...process.env,
+      KEPLER_PLANET_TOKEN: "test-token",
+      KEPLER_BASE_URL: "https://planet.turingguild.com",
+    },
+  });
 }
 
 function createRegistrationPayload() {
@@ -331,6 +347,214 @@ test("JSON option parsers reject malformed values", () => {
   expect(() => parseJsonObject('["bad"]', "runtime-attributes")).toThrow(
     "Invalid runtime-attributes. Use a JSON object.",
   );
+});
+
+test("power-only ticks drain battery energy and advance currentTick", async () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  starterModules[0].runtimeAttributes = {
+    ...starterModules[0].runtimeAttributes,
+    status: "maintenance",
+    powerDrawKw: { offline: 0, idle: 2, active: 2, damaged: 2 },
+  };
+  starterModules[1].runtimeAttributes = {
+    ...starterModules[1].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 5, active: 5, damaged: 5 },
+  };
+  starterModules[2].runtimeAttributes = {
+    ...starterModules[2].runtimeAttributes,
+    currentEnergyKwh: 500,
+    energyStorageKwh: 500,
+    powerDrawKw: { offline: 0, idle: 0, active: 0, damaged: 0 },
+  };
+  starterModules[3].runtimeAttributes = {
+    ...starterModules[3].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 0.5, active: 0.5, damaged: 0 },
+  };
+  starterModules[4].runtimeAttributes = {
+    ...starterModules[4].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 1, active: 8, damaged: 1 },
+  };
+  starterModules[5].runtimeAttributes = {
+    ...starterModules[5].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 0.5, active: 2, damaged: 0.5 },
+  };
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runPowerTicks(createConfig(cwd, async () => new Response(null, { status: 200 })), 1);
+
+  expect(result.startTick).toBe(0);
+  expect(result.endTick).toBe(1);
+  expect(result.totalEnergyUsedKwh).toBeCloseTo(7 / 3600, 8);
+  expect(result.batteries).toHaveLength(1);
+  expect(result.batteries[0]?.id).toBe("module-battery-1");
+  expect(result.batteries[0]?.currentEnergyKwh).toBeCloseTo(500 - 7 / 3600, 8);
+  expect(readTickState(cwd).currentTick).toBe(1);
+
+  const storedModules = JSON.parse(
+    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+  ) as Array<{ id: string; runtimeAttributes: { currentEnergyKwh?: number } }>;
+  const battery = storedModules.find((module) => module.id === "module-battery-1");
+  expect(battery?.runtimeAttributes.currentEnergyKwh).toBeCloseTo(500 - 7 / 3600, 8);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("CLI help shows the tick command", () => {
+  const cwd = createWorkspace();
+  const result = runCli(cwd, "--help");
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain("tick");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("module status shows module states, current power draw, and summary totals", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  starterModules[0].runtimeAttributes = {
+    ...starterModules[0].runtimeAttributes,
+    status: "maintenance",
+    powerDrawKw: { offline: 0, idle: 2, active: 2, damaged: 2 },
+  };
+  starterModules[1].runtimeAttributes = {
+    ...starterModules[1].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 5, active: 5, damaged: 5 },
+  };
+  starterModules[2].runtimeAttributes = {
+    ...starterModules[2].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 0, active: 0, damaged: 0 },
+  };
+  starterModules[3].runtimeAttributes = {
+    ...starterModules[3].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 0.5, active: 0.5, damaged: 0 },
+  };
+  starterModules[4].runtimeAttributes = {
+    ...starterModules[4].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 1, active: 8, damaged: 1 },
+  };
+  starterModules[5].runtimeAttributes = {
+    ...starterModules[5].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 0.5, active: 2, damaged: 0.5 },
+  };
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runCli(cwd, "module", "status");
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain("Module Name");
+  expect(result.stdout.toString()).toContain("Command Module");
+  expect(result.stdout.toString()).toContain("offline");
+  expect(result.stdout.toString()).toContain("0");
+  expect(result.stdout.toString()).toContain("Life Support");
+  expect(result.stdout.toString()).toContain("Basic Battery");
+  expect(result.stdout.toString()).toContain("offline");
+  expect(result.stdout.toString()).toContain("totalCurrentPowerDrawKw: 7");
+  expect(result.stdout.toString()).toContain("oneTickEnergyCostKwh: 0.0019444444444444444");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("module set-status updates only the runtime status and reports current power draw", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  starterModules[0].runtimeAttributes = {
+    ...starterModules[0].runtimeAttributes,
+    powerDrawKw: { offline: 0, idle: 2, online: 1, active: 4, damaged: 0.5 },
+  };
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runCli(cwd, "module", "set-status", "cm-1", "idle");
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain('Updated module "cm-1".');
+  expect(result.stdout.toString()).toContain("status: idle");
+  expect(result.stdout.toString()).toContain("currentPowerDrawKw: 2");
+
+  const storedModules = JSON.parse(
+    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+  ) as typeof starterModules;
+  const updatedModule = storedModules.find((module) => module.id === "module-command-1");
+
+  expect(updatedModule).toEqual({
+    ...starterModules[0],
+    runtimeAttributes: {
+      ...starterModules[0].runtimeAttributes,
+      status: "idle",
+    },
+  });
+
+  rmSync(cwd, { recursive: true, force: true });
 });
 
 test("unregister removes registration, modules, and blueprints files", async () => {

@@ -27,6 +27,14 @@ export type HabitatDetails = {
 };
 
 export type RuntimeAttributes = Record<string, unknown>;
+export const MODULE_RUNTIME_STATUSES = [
+  "offline",
+  "idle",
+  "online",
+  "active",
+  "damaged",
+] as const;
+export type ModuleRuntimeStatus = (typeof MODULE_RUNTIME_STATUSES)[number];
 
 export type StoredBlueprint = {
   id: string;
@@ -96,11 +104,28 @@ export type ModuleUpdateInput = {
   capabilities?: string[];
 };
 
+export type TickState = {
+  currentTick: number;
+};
+
+export type TickBatterySummary = {
+  id: string;
+  alias: string;
+  currentEnergyKwh: number;
+};
+
+export type ModulePowerStatusRow = {
+  displayName: string;
+  status: ModuleRuntimeStatus;
+  currentPowerDrawKw: number;
+};
+
 const DEFAULT_BASE_URL = "https://planet.turingguild.com";
 const HABITAT_DIRECTORY = ".habitat";
 const REGISTRATION_FILE = "registration.json";
 const MODULES_FILE = "modules.json";
 const BLUEPRINTS_FILE = "blueprints.json";
+const STATE_FILE = "state.json";
 
 export class CliError extends Error {
   constructor(message: string) {
@@ -232,6 +257,15 @@ export async function unregisterHabitat(config: CliConfig): Promise<Registration
   return registration;
 }
 
+export function readTickState(cwd: string): TickState {
+  const statePath = getStatePath(cwd);
+  if (!existsSync(statePath)) {
+    return { currentTick: 0 };
+  }
+
+  return JSON.parse(readFileSync(statePath, "utf8")) as TickState;
+}
+
 export function listModules(config: CliConfig): LocalHabitatModule[] {
   requireStoredRegistration(config.cwd);
   return readStoredModules(config.cwd);
@@ -317,11 +351,111 @@ export function deleteModule(config: CliConfig, moduleId: string): LocalHabitatM
   return removed;
 }
 
+export function setModuleStatus(
+  config: CliConfig,
+  moduleReference: string,
+  status: ModuleRuntimeStatus,
+): {
+  module: LocalHabitatModule;
+  currentPowerDrawKw: number;
+} {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+  const module = resolveModuleReferenceFromModules(modules, moduleReference);
+
+  module.runtimeAttributes.status = status;
+  writeStoredModules(config.cwd, modules);
+
+  return {
+    module,
+    currentPowerDrawKw: getModuleCurrentPowerDrawKw(module),
+  };
+}
+
+export function runPowerTicks(
+  config: CliConfig,
+  count: number,
+): {
+  startTick: number;
+  endTick: number;
+  totalEnergyUsedKwh: number;
+  batteries: TickBatterySummary[];
+} {
+  requireStoredRegistration(config.cwd);
+
+  if (!Number.isInteger(count) || count <= 0) {
+    throw new CliError("Invalid tick count. Use a positive integer.");
+  }
+
+  const modules = readStoredModules(config.cwd);
+  const state = readTickState(config.cwd);
+  const startTick = state.currentTick;
+  let totalEnergyUsedKwh = 0;
+
+  for (let tick = 0; tick < count; tick += 1) {
+    const tickEnergyUsedKwh = modules.reduce(
+      (sum, module) => sum + getModuleCurrentPowerDrawKw(module) / 3600,
+      0,
+    );
+
+    drainBatteries(modules, tickEnergyUsedKwh);
+    totalEnergyUsedKwh += tickEnergyUsedKwh;
+    state.currentTick += 1;
+  }
+
+  writeStoredModules(config.cwd, modules);
+  writeTickState(config.cwd, state);
+
+  const batteries = modules
+    .filter(isBatteryModule)
+    .map((module) => ({
+      id: module.id,
+      alias: getModuleAlias(module, modules),
+      currentEnergyKwh: getBatteryEnergy(module),
+    }));
+
+  return {
+    startTick,
+    endTick: state.currentTick,
+    totalEnergyUsedKwh,
+    batteries,
+  };
+}
+
 export function formatModuleListEntry(
   module: LocalHabitatModule,
   modules: LocalHabitatModule[],
 ): string {
   return `${getModuleAlias(module, modules)} | ${module.displayName} | ${module.blueprintId} | source=${module.source}`;
+}
+
+export function getModulePowerStatus(
+  config: CliConfig,
+): {
+  rows: ModulePowerStatusRow[];
+  totalCurrentPowerDrawKw: number;
+  oneTickEnergyCostKwh: number;
+} {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+  const rows = modules.map((module) => {
+    const status = getDisplayedModuleStatus(module);
+    const currentPowerDrawKw = getModuleCurrentPowerDrawKw(module);
+
+    return {
+      displayName: module.displayName,
+      status,
+      currentPowerDrawKw,
+    };
+  });
+
+  const totalCurrentPowerDrawKw = rows.reduce((sum, row) => sum + row.currentPowerDrawKw, 0);
+
+  return {
+    rows,
+    totalCurrentPowerDrawKw,
+    oneTickEnergyCostKwh: totalCurrentPowerDrawKw / 3600,
+  };
 }
 
 export function parseJsonArray(value: string, label: string): string[] {
@@ -440,6 +574,10 @@ function getBlueprintsPath(cwd: string): string {
   return path.join(getHabitatDirectory(cwd), BLUEPRINTS_FILE);
 }
 
+function getStatePath(cwd: string): string {
+  return path.join(getHabitatDirectory(cwd), STATE_FILE);
+}
+
 function ensureHabitatDirectory(cwd: string): void {
   const habitatDirectory = getHabitatDirectory(cwd);
   if (!existsSync(habitatDirectory)) {
@@ -500,16 +638,107 @@ function writeStoredBlueprints(cwd: string, blueprints: Record<string, StoredBlu
   writeFileSync(getBlueprintsPath(cwd), `${JSON.stringify(blueprints, null, 2)}\n`);
 }
 
+function writeTickState(cwd: string, state: TickState): void {
+  ensureHabitatDirectory(cwd);
+  writeFileSync(getStatePath(cwd), `${JSON.stringify(state, null, 2)}\n`);
+}
+
 function deleteStoredState(cwd: string): void {
   for (const filePath of [
     getRegistrationPath(cwd),
     getModulesPath(cwd),
     getBlueprintsPath(cwd),
+    getStatePath(cwd),
   ]) {
     if (existsSync(filePath)) {
       rmSync(filePath, { force: true });
     }
   }
+}
+
+function isBatteryModule(module: LocalHabitatModule): boolean {
+  return typeof module.runtimeAttributes.currentEnergyKwh === "number"
+    && typeof module.runtimeAttributes.energyStorageKwh === "number";
+}
+
+function getBatteryEnergy(module: LocalHabitatModule): number {
+  return typeof module.runtimeAttributes.currentEnergyKwh === "number"
+    ? module.runtimeAttributes.currentEnergyKwh
+    : 0;
+}
+
+function drainBatteries(modules: LocalHabitatModule[], energyUsedKwh: number): void {
+  if (energyUsedKwh <= 0) {
+    return;
+  }
+
+  const batteries = modules.filter(
+    (module) => isBatteryModule(module) && getBatteryEnergy(module) > 0,
+  );
+
+  const totalAvailableEnergy = batteries.reduce(
+    (sum, module) => sum + getBatteryEnergy(module),
+    0,
+  );
+
+  if (totalAvailableEnergy <= 0) {
+    return;
+  }
+
+  for (const battery of batteries) {
+    const currentEnergy = getBatteryEnergy(battery);
+    const share = currentEnergy / totalAvailableEnergy;
+    const drained = energyUsedKwh * share;
+    battery.runtimeAttributes.currentEnergyKwh = Math.max(0, currentEnergy - drained);
+  }
+}
+
+function getModuleCurrentPowerDrawKw(module: LocalHabitatModule): number {
+  const rawStatus =
+    typeof module.runtimeAttributes.status === "string" ? module.runtimeAttributes.status : null;
+  const displayedStatus = getDisplayedModuleStatus(module);
+  const powerDraw = module.runtimeAttributes.powerDrawKw;
+
+  if (!powerDraw || typeof powerDraw !== "object" || Array.isArray(powerDraw)) {
+    return 0;
+  }
+
+  const lookup = powerDraw as Record<string, unknown>;
+
+  if (rawStatus) {
+    const rawPowerKw = lookup[rawStatus];
+    if (typeof rawPowerKw === "number") {
+      return rawPowerKw;
+    }
+  }
+
+  const normalizedPowerKw = lookup[displayedStatus];
+  return typeof normalizedPowerKw === "number" ? normalizedPowerKw : 0;
+}
+
+function getDisplayedModuleStatus(
+  module: LocalHabitatModule,
+): ModuleRuntimeStatus {
+  const rawStatus =
+    typeof module.runtimeAttributes.status === "string"
+      ? module.runtimeAttributes.status.toLowerCase()
+      : "";
+
+  if (
+    rawStatus === "online" ||
+    rawStatus === "offline" ||
+    rawStatus === "idle" ||
+    rawStatus === "active" ||
+    rawStatus === "damaged"
+  ) {
+    return rawStatus;
+  }
+
+  if (rawStatus === "maintenance") {
+    return "offline";
+  }
+
+  return "offline";
 }
 
 async function requestJson<T>(

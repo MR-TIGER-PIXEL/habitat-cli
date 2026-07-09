@@ -266,6 +266,83 @@ function createRegistrationDatabase(habitatDirectory: string): Database {
   return database;
 }
 
+function createLocalStateDatabase(habitatDirectory: string): Database {
+  const database = createRegistrationDatabase(habitatDirectory);
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS modules (
+      id TEXT PRIMARY KEY,
+      module_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory (
+      resource_type TEXT PRIMARY KEY,
+      quantity INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS tick_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      current_tick INTEGER NOT NULL
+    );
+  `);
+  return database;
+}
+
+function seedModules(habitatDirectory: string, modules: LocalHabitatModule[]): void {
+  const database = createLocalStateDatabase(habitatDirectory);
+  database.query("DELETE FROM modules").run();
+  const insert = database.query("INSERT INTO modules (id, module_json) VALUES (?, ?)");
+  for (const module of modules) {
+    insert.run(module.id, JSON.stringify(module));
+  }
+}
+
+function seedInventory(habitatDirectory: string, inventory: Record<string, number>): void {
+  const database = createLocalStateDatabase(habitatDirectory);
+  database.query("DELETE FROM inventory").run();
+  const insert = database.query("INSERT INTO inventory (resource_type, quantity) VALUES (?, ?)");
+  for (const [resourceType, quantity] of Object.entries(inventory)) {
+    insert.run(resourceType, quantity);
+  }
+}
+
+function readModulesJson(habitatDirectory: string): string {
+  const database = createLocalStateDatabase(habitatDirectory);
+  const rows = database
+    .query<{ module_json: string }, []>("SELECT module_json FROM modules ORDER BY rowid")
+    .all();
+  return `${JSON.stringify(rows.map((row) => JSON.parse(row.module_json)), null, 2)}\n`;
+}
+
+function readInventoryJson(habitatDirectory: string): string {
+  const database = createLocalStateDatabase(habitatDirectory);
+  const rows = database
+    .query<{ resource_type: string; quantity: number }, []>(
+      "SELECT resource_type, quantity FROM inventory ORDER BY resource_type",
+    )
+    .all();
+  return `${JSON.stringify(Object.fromEntries(rows.map((row) => [row.resource_type, row.quantity])), null, 2)}\n`;
+}
+
+function seedTickState(habitatDirectory: string, currentTick: number): void {
+  const database = createLocalStateDatabase(habitatDirectory);
+  database
+    .query(
+      `INSERT INTO tick_state (id, current_tick)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         current_tick = excluded.current_tick`,
+    )
+    .run(currentTick);
+}
+
+function readTickStateValue(habitatDirectory: string): number {
+  const database = createLocalStateDatabase(habitatDirectory);
+  const row = database.query<{ current_tick: number }, []>(
+    "SELECT current_tick FROM tick_state WHERE id = 1",
+  ).get();
+  return row?.current_tick ?? 0;
+}
+
 test("register stores registration, hydrated starter modules, and blueprint lookups", async () => {
   const cwd = createWorkspace();
   const requests: Array<{ url: string; method: string; body?: unknown }> = [];
@@ -309,7 +386,7 @@ test("register stores registration, hydrated starter modules, and blueprint look
   const habitatDirectory = path.join(cwd, ".habitat");
   expect(existsSync(path.join(habitatDirectory, "habitat.sqlite"))).toBe(true);
   expect(existsSync(path.join(habitatDirectory, "registration.json"))).toBe(false);
-  expect(existsSync(path.join(habitatDirectory, "modules.json"))).toBe(true);
+  expect(existsSync(path.join(habitatDirectory, "modules.json"))).toBe(false);
   expect(existsSync(path.join(habitatDirectory, "blueprints.json"))).toBe(true);
 
   const database = createRegistrationDatabase(habitatDirectory);
@@ -326,7 +403,7 @@ test("register stores registration, hydrated starter modules, and blueprint look
   expect(storedRegistration).toEqual(result.registration);
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{ id: string }>;
   expect(storedModules).toHaveLength(6);
   expect(storedModules.map((module) => module.id)).toEqual(
@@ -360,12 +437,12 @@ test("status includes remote habitat details and local module count", async () =
       "https://planet.turingguild.com",
     );
 
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(createRegistrationPayload().starterModules.map((module) => ({
+  seedModules(
+    habitatDirectory,
+    createRegistrationPayload().starterModules.map((module) => ({
       ...module,
       source: "registration",
-    })), null, 2)}\n`,
+    })),
   );
 
   const requests: string[] = [];
@@ -549,10 +626,7 @@ test("module CRUD works against local hydrated module state", async () => {
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
   writeFileSync(
     path.join(habitatDirectory, "blueprints.json"),
     `${JSON.stringify(
@@ -663,12 +737,10 @@ test("power-only ticks drain battery energy and advance currentTick", async () =
       "Starlight Forge",
       "11111111-1111-4111-8111-111111111111",
       "habitat_11111111_1111_4111_8111_111111111111",
-      "https://planet.turingguild.com",
-    );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
+    "https://planet.turingguild.com",
   );
+  seedModules(habitatDirectory, starterModules);
+  seedTickState(habitatDirectory, 0);
 
   const result = runPowerTicks(
     createConfig(cwd, createFetchMock(async () => new Response(null, { status: 200 }))),
@@ -681,10 +753,11 @@ test("power-only ticks drain battery energy and advance currentTick", async () =
   expect(result.batteries).toHaveLength(1);
   expect(result.batteries[0]?.id).toBe("module-battery-1");
   expect(result.batteries[0]?.currentEnergyKwh).toBeCloseTo(100 - 7 / 3600, 8);
+  expect(readTickStateValue(habitatDirectory)).toBe(1);
   expect(readTickState(cwd).currentTick).toBe(1);
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{ id: string; runtimeAttributes: { currentEnergyKwh?: number } }>;
   const battery = storedModules.find((module) => module.id === "module-battery-1");
   expect(battery?.runtimeAttributes.currentEnergyKwh).toBeCloseTo(100 - 7 / 3600, 8);
@@ -742,10 +815,7 @@ test("tick uses fetched solar irradiance to charge an online battery", () => {
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -765,7 +835,7 @@ test("tick uses fetched solar irradiance to charge an online battery", () => {
   expect(result.exitCode).toBe(0);
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{ id: string; runtimeAttributes: { currentEnergyKwh?: number } }>;
   const battery = storedModules.find((module) => module.id === "module-battery-1");
   const startingBatteryChargeKwh = 100;
@@ -830,10 +900,7 @@ test("tick does not charge a battery beyond its energyStorageKwh", () => {
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -853,7 +920,7 @@ test("tick does not charge a battery beyond its energyStorageKwh", () => {
   expect(result.exitCode).toBe(0);
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{ id: string; runtimeAttributes: { currentEnergyKwh?: number } }>;
   const battery = storedModules.find((module) => module.id === "module-battery-1");
   expect(battery?.runtimeAttributes.currentEnergyKwh).toBe(500);
@@ -905,10 +972,7 @@ test("tick reports why solar charging did not happen when no online batteries ex
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -979,10 +1043,7 @@ test("ticks reduce remaining build ticks for active construction jobs", () => {
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   runPowerTicks(
     createConfig(cwd, createFetchMock(async () => new Response(null, { status: 200 }))),
@@ -990,7 +1051,7 @@ test("ticks reduce remaining build ticks for active construction jobs", () => {
   );
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{ id: string; runtimeAttributes: Record<string, unknown> }>;
   const workshop = storedModules.find((module) => module.id === "module-workshop-1");
   const constructionJob = workshop?.runtimeAttributes.constructionJob as Record<string, unknown>;
@@ -1044,10 +1105,7 @@ test("tick completes construction jobs, creates the output module, and frees the
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -1073,7 +1131,7 @@ test("tick completes construction jobs, creates the output module, and frees the
   expect(result.stdout.toString()).toContain("solarSummary: No sunlight reached the habitat, so solar charging could not happen.");
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{
     id: string;
     blueprintId: string;
@@ -1147,10 +1205,7 @@ test("tick can charge a battery after completing a small solar array constructio
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -1176,7 +1231,7 @@ test("tick can charge a battery after completing a small solar array constructio
   expect(stdout).toContain("solarSummary: Solar panels charged the online batteries.");
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{
     id: string;
     blueprintId: string;
@@ -1232,21 +1287,15 @@ test("planConstruction reports constructibility without mutating local state", (
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
   writeFileSync(
     path.join(habitatDirectory, "blueprints.json"),
     `${JSON.stringify(blueprints, null, 2)}\n`,
   );
-  writeFileSync(
-    path.join(habitatDirectory, "inventory.json"),
-    `${JSON.stringify({ aluminum: 10, electronics: 5 }, null, 2)}\n`,
-  );
+  seedInventory(habitatDirectory, { aluminum: 10, electronics: 5 });
 
-  const modulesBefore = readFileSync(path.join(habitatDirectory, "modules.json"), "utf8");
-  const inventoryBefore = readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8");
+  const modulesBefore = readModulesJson(habitatDirectory);
+  const inventoryBefore = readInventoryJson(habitatDirectory);
 
   const result = planConstruction(
     createConfig(cwd, createFetchMock(async () => new Response(null, { status: 200 }))),
@@ -1261,8 +1310,8 @@ test("planConstruction reports constructibility without mutating local state", (
   expect(result.wouldCreateModule.blueprintId).toBe("small-solar-array");
   expect(result.resourcesToSpend).toEqual({ aluminum: 8, electronics: 2 });
   expect(result.canStart).toBe(true);
-  expect(readFileSync(path.join(habitatDirectory, "modules.json"), "utf8")).toBe(modulesBefore);
-  expect(readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8")).toBe(inventoryBefore);
+  expect(readModulesJson(habitatDirectory)).toBe(modulesBefore);
+  expect(readInventoryJson(habitatDirectory)).toBe(inventoryBefore);
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -1303,21 +1352,15 @@ test("construct dry-run reports blocked requirements and exits without mutating 
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
   writeFileSync(
     path.join(habitatDirectory, "blueprints.json"),
     `${JSON.stringify({ "small-solar-array": createConstructibleBlueprintPayload() }, null, 2)}\n`,
   );
-  writeFileSync(
-    path.join(habitatDirectory, "inventory.json"),
-    `${JSON.stringify({ aluminum: 3, electronics: 1 }, null, 2)}\n`,
-  );
+  seedInventory(habitatDirectory, { aluminum: 3, electronics: 1 });
 
-  const modulesBefore = readFileSync(path.join(habitatDirectory, "modules.json"), "utf8");
-  const inventoryBefore = readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8");
+  const modulesBefore = readModulesJson(habitatDirectory);
+  const inventoryBefore = readInventoryJson(habitatDirectory);
 
   const result = runCli(cwd, "construct", "small-solar-array", "--dry-run");
 
@@ -1336,8 +1379,8 @@ test("construct dry-run reports blocked requirements and exits without mutating 
   expect(stdout).toContain("inventory shortfall: aluminum need=8 have=3");
   expect(stdout).toContain("inventory shortfall: electronics need=2 have=1");
   expect(stdout).toContain("construction cannot start or advance until a usable battery or power source is online");
-  expect(readFileSync(path.join(habitatDirectory, "modules.json"), "utf8")).toBe(modulesBefore);
-  expect(readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8")).toBe(inventoryBefore);
+  expect(readModulesJson(habitatDirectory)).toBe(modulesBefore);
+  expect(readInventoryJson(habitatDirectory)).toBe(inventoryBefore);
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -1369,14 +1412,8 @@ test("construct starts a local construction job from the Kepler blueprint and sp
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
-  writeFileSync(
-    path.join(habitatDirectory, "inventory.json"),
-    `${JSON.stringify({ aluminum: 10, electronics: 5 }, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
+  seedInventory(habitatDirectory, { aluminum: 10, electronics: 5 });
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -1399,12 +1436,12 @@ test("construct starts a local construction job from the Kepler blueprint and sp
   expect(stdout).toContain("remainingBuildTicks: 120");
 
   const storedInventory = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8"),
+    readInventoryJson(habitatDirectory),
   ) as Record<string, number>;
   expect(storedInventory).toEqual({ aluminum: 2, electronics: 3 });
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{
     id: string;
     blueprintId: string;
@@ -1463,17 +1500,11 @@ test("construct leaves local state unchanged when fetched Kepler blueprint canno
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
-  writeFileSync(
-    path.join(habitatDirectory, "inventory.json"),
-    `${JSON.stringify({ aluminum: 10, electronics: 5 }, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
+  seedInventory(habitatDirectory, { aluminum: 10, electronics: 5 });
 
-  const modulesBefore = readFileSync(path.join(habitatDirectory, "modules.json"), "utf8");
-  const inventoryBefore = readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8");
+  const modulesBefore = readModulesJson(habitatDirectory);
+  const inventoryBefore = readInventoryJson(habitatDirectory);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -1489,8 +1520,8 @@ test("construct leaves local state unchanged when fetched Kepler blueprint canno
 
   expect(result.exitCode).toBe(1);
   expect(result.stderr.toString()).toContain("required construction facility is busy");
-  expect(readFileSync(path.join(habitatDirectory, "modules.json"), "utf8")).toBe(modulesBefore);
-  expect(readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8")).toBe(inventoryBefore);
+  expect(readModulesJson(habitatDirectory)).toBe(modulesBefore);
+  expect(readInventoryJson(habitatDirectory)).toBe(inventoryBefore);
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -1524,7 +1555,7 @@ test("inventory add stores local resource quantities without Kepler validation",
   expect(fourthAdd.exitCode).toBe(0);
 
   const storedInventory = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8"),
+    readInventoryJson(habitatDirectory),
   ) as Record<string, number>;
   expect(storedInventory).toEqual({
     ferrite: 100,
@@ -1551,18 +1582,11 @@ test("inventory list prints the local habitat inventory", () => {
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "inventory.json"),
-    `${JSON.stringify(
-      {
-        ferrite: 90,
-        "silicate-glass": 45,
-        "conductive-ore": 18,
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  seedInventory(habitatDirectory, {
+    ferrite: 90,
+    "silicate-glass": 45,
+    "conductive-ore": 18,
+  });
 
   const result = runCli(cwd, "inventory", "list");
 
@@ -1613,10 +1637,7 @@ test("construction status prints active local construction jobs", () => {
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "construction", "status");
 
@@ -1647,12 +1668,12 @@ test("construction status prints a friendly message when no active jobs exist", 
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(createRegistrationPayload().starterModules.map((module) => ({
+  seedModules(
+    habitatDirectory,
+    createRegistrationPayload().starterModules.map((module) => ({
       ...module,
       source: "registration",
-    })), null, 2)}\n`,
+    })),
   );
 
   const result = runCli(cwd, "construction", "status");
@@ -1699,16 +1720,10 @@ test("construction cancel clears the stored job, frees the fabricator, and does 
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
-  writeFileSync(
-    path.join(habitatDirectory, "inventory.json"),
-    `${JSON.stringify({ ferrite: 90, "silicate-glass": 45, "conductive-ore": 18 }, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
+  seedInventory(habitatDirectory, { ferrite: 90, "silicate-glass": 45, "conductive-ore": 18 });
 
-  const inventoryBefore = readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8");
+  const inventoryBefore = readInventoryJson(habitatDirectory);
 
   const result = runCli(cwd, "construction", "cancel", "wf-1");
 
@@ -1716,7 +1731,7 @@ test("construction cancel clears the stored job, frees the fabricator, and does 
   expect(result.stdout.toString()).toContain('Canceled construction job on "wf-1".');
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as Array<{
     id: string;
     runtimeAttributes: Record<string, unknown>;
@@ -1726,7 +1741,7 @@ test("construction cancel clears the stored job, frees the fabricator, and does 
   expect("constructionJobId" in (workshop?.runtimeAttributes ?? {})).toBe(false);
   expect("constructionJob" in (workshop?.runtimeAttributes ?? {})).toBe(false);
   expect(storedModules.some((module) => module.id === "module-small-solar-array-1")).toBe(false);
-  expect(readFileSync(path.join(habitatDirectory, "inventory.json"), "utf8")).toBe(inventoryBefore);
+  expect(readInventoryJson(habitatDirectory)).toBe(inventoryBefore);
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -1767,10 +1782,7 @@ test("construction cancel removes the job so construction status reports none", 
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const cancelResult = runCli(cwd, "construction", "cancel", "module-workshop-1");
   const statusResult = runCli(cwd, "construction", "status");
@@ -1818,10 +1830,7 @@ test("construction cancel accepts the generated fabricator name workshop-fabrica
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "construction", "cancel", "workshop-fabricator-1");
 
@@ -1867,10 +1876,7 @@ test("module show presents active construction job details clearly for generated
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "module", "show", "workshop-fabricator-1");
 
@@ -1917,10 +1923,7 @@ test("module show presents battery details clearly for generated battery names",
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "module", "show", "basic-battery-1");
 
@@ -1975,10 +1978,7 @@ test("module show presents completed small solar array attributes clearly for ge
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "module", "show", "small-solar-array-1");
 
@@ -2020,10 +2020,7 @@ test("module list prints a clean table with alias, module name, blueprint id, an
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "module", "list");
 
@@ -2246,10 +2243,7 @@ test("module status shows module states, current power draw, and summary totals"
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "module", "status");
 
@@ -2299,10 +2293,7 @@ test("module set-status updates only the runtime status and reports current powe
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(starterModules, null, 2)}\n`,
-  );
+  seedModules(habitatDirectory, starterModules);
 
   const result = runCli(cwd, "module", "set-status", "cm-1", "idle");
 
@@ -2312,7 +2303,7 @@ test("module set-status updates only the runtime status and reports current powe
   expect(result.stdout.toString()).toContain("currentPowerDrawKw: 2");
 
   const storedModules = JSON.parse(
-    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+    readModulesJson(habitatDirectory),
   ) as typeof starterModules;
   const updatedModule = storedModules.find((module) => module.id === "module-command-1");
 
@@ -2344,9 +2335,12 @@ test("unregister removes registration, modules, and blueprints files", async () 
       "habitat_11111111_1111_4111_8111_111111111111",
       "https://planet.turingguild.com",
     );
-  writeFileSync(
-    path.join(habitatDirectory, "modules.json"),
-    `${JSON.stringify(createRegistrationPayload().starterModules, null, 2)}\n`,
+  seedModules(
+    habitatDirectory,
+    createRegistrationPayload().starterModules.map((module) => ({
+      ...module,
+      source: "registration" as const,
+    })),
   );
   writeFileSync(
     path.join(habitatDirectory, "blueprints.json"),

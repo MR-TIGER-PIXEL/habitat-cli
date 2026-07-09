@@ -236,10 +236,7 @@ export type CanceledConstruction = {
 const DEFAULT_BASE_URL = "https://planet.turingguild.com";
 const HABITAT_DIRECTORY = ".habitat";
 const HABITAT_DATABASE = "habitat.sqlite";
-const MODULES_FILE = "modules.json";
 const BLUEPRINTS_FILE = "blueprints.json";
-const INVENTORY_FILE = "inventory.json";
-const STATE_FILE = "state.json";
 
 export class CliError extends Error {
   constructor(message: string) {
@@ -416,12 +413,11 @@ export async function getOfficialBlueprint(
 }
 
 export function readTickState(cwd: string): TickState {
-  const statePath = getStatePath(cwd);
-  if (!existsSync(statePath)) {
-    return { currentTick: 0 };
-  }
-
-  return JSON.parse(readFileSync(statePath, "utf8")) as TickState;
+  const database = openHabitatDatabase(cwd);
+  const row = database.query<{ current_tick: number }, []>(
+    "SELECT current_tick FROM tick_state WHERE id = 1",
+  ).get();
+  return row ? { currentTick: row.current_tick } : { currentTick: 0 };
 }
 
 export function listModules(config: CliConfig): LocalHabitatModule[] {
@@ -1066,20 +1062,8 @@ function getDatabasePath(cwd: string): string {
   return path.join(getHabitatDirectory(cwd), HABITAT_DATABASE);
 }
 
-function getModulesPath(cwd: string): string {
-  return path.join(getHabitatDirectory(cwd), MODULES_FILE);
-}
-
 function getBlueprintsPath(cwd: string): string {
   return path.join(getHabitatDirectory(cwd), BLUEPRINTS_FILE);
-}
-
-function getInventoryPath(cwd: string): string {
-  return path.join(getHabitatDirectory(cwd), INVENTORY_FILE);
-}
-
-function getStatePath(cwd: string): string {
-  return path.join(getHabitatDirectory(cwd), STATE_FILE);
 }
 
 function ensureHabitatDirectory(cwd: string): void {
@@ -1099,6 +1083,21 @@ function openHabitatDatabase(cwd: string): Database {
       habitat_uuid TEXT NOT NULL,
       habitat_id TEXT NOT NULL,
       base_url TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS modules (
+      id TEXT PRIMARY KEY,
+      module_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS inventory (
+      resource_type TEXT PRIMARY KEY,
+      quantity INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS tick_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      current_tick INTEGER NOT NULL
     );
   `);
   return database;
@@ -1142,17 +1141,24 @@ function writeStoredRegistration(cwd: string, registration: RegistrationRecord):
 }
 
 function readStoredModules(cwd: string): LocalHabitatModule[] {
-  const modulesPath = getModulesPath(cwd);
-  if (!existsSync(modulesPath)) {
-    return [];
-  }
-
-  return JSON.parse(readFileSync(modulesPath, "utf8")) as LocalHabitatModule[];
+  const database = openHabitatDatabase(cwd);
+  const rows = database.query<{ module_json: string }, []>(
+    "SELECT module_json FROM modules ORDER BY rowid",
+  ).all();
+  return rows.map((row) => JSON.parse(row.module_json) as LocalHabitatModule);
 }
 
 function writeStoredModules(cwd: string, modules: LocalHabitatModule[]): void {
   ensureHabitatDirectory(cwd);
-  writeFileSync(getModulesPath(cwd), `${JSON.stringify(modules, null, 2)}\n`);
+  const database = openHabitatDatabase(cwd);
+  const transaction = database.transaction((items: LocalHabitatModule[]) => {
+    database.query("DELETE FROM modules").run();
+    const insert = database.query("INSERT INTO modules (id, module_json) VALUES (?, ?)");
+    for (const module of items) {
+      insert.run(module.id, JSON.stringify(module));
+    }
+  });
+  transaction(modules);
 }
 
 function readStoredBlueprints(cwd: string): Record<string, StoredBlueprint> {
@@ -1165,17 +1171,24 @@ function readStoredBlueprints(cwd: string): Record<string, StoredBlueprint> {
 }
 
 function readStoredInventory(cwd: string): ConstructionMaterialMap {
-  const inventoryPath = getInventoryPath(cwd);
-  if (!existsSync(inventoryPath)) {
-    return {};
-  }
-
-  return JSON.parse(readFileSync(inventoryPath, "utf8")) as ConstructionMaterialMap;
+  const database = openHabitatDatabase(cwd);
+  const rows = database.query<{ resource_type: string; quantity: number }, []>(
+    "SELECT resource_type, quantity FROM inventory ORDER BY resource_type",
+  ).all();
+  return Object.fromEntries(rows.map((row) => [row.resource_type, row.quantity]));
 }
 
 function writeStoredInventory(cwd: string, inventory: ConstructionMaterialMap): void {
   ensureHabitatDirectory(cwd);
-  writeFileSync(getInventoryPath(cwd), `${JSON.stringify(inventory, null, 2)}\n`);
+  const database = openHabitatDatabase(cwd);
+  const transaction = database.transaction((items: ConstructionMaterialMap) => {
+    database.query("DELETE FROM inventory").run();
+    const insert = database.query("INSERT INTO inventory (resource_type, quantity) VALUES (?, ?)");
+    for (const [resourceType, quantity] of Object.entries(items)) {
+      insert.run(resourceType, quantity);
+    }
+  });
+  transaction(inventory);
 }
 
 function writeStoredBlueprints(cwd: string, blueprints: Record<string, StoredBlueprint>): void {
@@ -1185,16 +1198,21 @@ function writeStoredBlueprints(cwd: string, blueprints: Record<string, StoredBlu
 
 function writeTickState(cwd: string, state: TickState): void {
   ensureHabitatDirectory(cwd);
-  writeFileSync(getStatePath(cwd), `${JSON.stringify(state, null, 2)}\n`);
+  const database = openHabitatDatabase(cwd);
+  database
+    .query(
+      `INSERT INTO tick_state (id, current_tick)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         current_tick = excluded.current_tick`,
+    )
+    .run(state.currentTick);
 }
 
 function deleteStoredState(cwd: string): void {
   for (const filePath of [
     getDatabasePath(cwd),
-    getModulesPath(cwd),
     getBlueprintsPath(cwd),
-    getInventoryPath(cwd),
-    getStatePath(cwd),
   ]) {
     if (existsSync(filePath)) {
       rmSync(filePath, { force: true });

@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import packageJson from "../../package.json";
-import { CliError, getRegistrationStatus, readTickState, registerHabitat, resolveConfig, runPowerTicks, unregisterHabitat } from "../kepler";
+import { CliError, getRegistrationStatus, getSolarIrradiance, readTickState, registerHabitat, resolveConfig, runPowerTicks, unregisterHabitat } from "../kepler";
 import { createBlueprintCommand } from "./blueprint-commands";
 import { createConstructionCommand } from "./construction-commands";
 import { createConstructCommand } from "./construct-commands";
@@ -9,6 +9,7 @@ import { createInventoryCommand } from "./inventory-commands";
 import { createModuleCommand } from "./module-commands";
 import { parseInteger } from "./parsers";
 import { createResourceCommand } from "./resource-commands";
+import { createSolarCommand } from "./solar-commands";
 
 export function createProgram(): Command {
   const program = new Command();
@@ -26,7 +27,8 @@ export function createProgram(): Command {
 Examples:
   habitat register --name "Starlight Forge"
   habitat status
-  habitat tick --count 60
+  habitat tick 60
+  habitat solar status
   habitat inventory add ferrite 90
   habitat inventory list
   habitat construct small-solar-array --dry-run
@@ -56,10 +58,11 @@ Examples:
   program
     .command("tick")
     .description("Advance the local habitat simulation by a number of power-only ticks.")
-    .requiredOption("--count <count>", "Number of ticks to advance", parseInteger)
-    .action((options: { count: number }) => {
+    .argument("<count>", "Number of ticks to advance", parseInteger)
+    .action(async (count: number) => {
       const config = resolveConfig(process.cwd());
-      printTickResult(runPowerTicks(config, options.count), options.count);
+      const solarIrradiance = await getSolarIrradiance(config);
+      printTickResult(runPowerTicks(config, count, solarIrradiance), count);
     });
 
   program.addCommand(createModuleCommand());
@@ -68,6 +71,7 @@ Examples:
   program.addCommand(createConstructCommand());
   program.addCommand(createConstructionCommand());
   program.addCommand(createResourceCommand());
+  program.addCommand(createSolarCommand());
 
   program
     .command("unregister")

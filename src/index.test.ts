@@ -7,6 +7,7 @@ import {
   deleteModule,
   formatModuleListEntry,
   getOfficialBlueprint,
+  getSolarIrradiance,
   getRegistrationStatus,
   listModules,
   listOfficialBlueprints,
@@ -23,6 +24,7 @@ import {
   updateModule,
   type CliConfig,
   type FetchLike,
+  type LocalHabitatModule,
   type StoredBlueprint,
 } from "./kepler";
 
@@ -225,7 +227,7 @@ function createConstructibleBlueprintPayload(): StoredBlueprint {
     buildTicks: 120,
     prerequisites: ["command-module", "basic-fabrication"],
     repeatable: true,
-    runtimeAttributes: { status: "online", health: 100 },
+    runtimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
     capabilities: ["power-generation"],
   };
 }
@@ -239,6 +241,13 @@ function createOfficialResourcePayload() {
     rarity: "common",
     description: "Frozen water that can be processed into life support and fuel inputs.",
     unit: "kg",
+  };
+}
+
+function createSolarIrradiancePayload() {
+  return {
+    irradianceWPerM2: 800,
+    condition: "clear",
   };
 }
 
@@ -469,12 +478,34 @@ test("listOfficialResources reads the official Kepler resource catalog without t
   rmSync(cwd, { recursive: true, force: true });
 });
 
+test("getSolarIrradiance reads the current Kepler world solar irradiance without touching local state", async () => {
+  const cwd = createWorkspace();
+  const requests: string[] = [];
+  const solar = createSolarIrradiancePayload();
+
+  const fetchMock = createFetchMock(async (url, init) => {
+    requests.push(`${init?.method ?? "GET"} ${String(url)}`);
+    return new Response(JSON.stringify(solar), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  const result = await getSolarIrradiance(createConfig(cwd, fetchMock));
+
+  expect(requests).toEqual(["GET https://planet.turingguild.com/world/solar-irradiance"]);
+  expect(result).toEqual(solar);
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
 test("module CRUD works against local hydrated module state", async () => {
   const cwd = createWorkspace();
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
     ...module,
     source: "registration" as const,
   }));
@@ -565,7 +596,7 @@ test("power-only ticks drain battery energy and advance currentTick", async () =
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
     ...module,
     source: "registration" as const,
   }));
@@ -580,7 +611,7 @@ test("power-only ticks drain battery energy and advance currentTick", async () =
   };
   starterModules[2].runtimeAttributes = {
     ...starterModules[2].runtimeAttributes,
-    currentEnergyKwh: 500,
+    currentEnergyKwh: 100,
     energyStorageKwh: 500,
     powerDrawKw: { offline: 0, idle: 0, active: 0, damaged: 0 },
   };
@@ -625,14 +656,263 @@ test("power-only ticks drain battery energy and advance currentTick", async () =
   expect(result.totalEnergyUsedKwh).toBeCloseTo(7 / 3600, 8);
   expect(result.batteries).toHaveLength(1);
   expect(result.batteries[0]?.id).toBe("module-battery-1");
-  expect(result.batteries[0]?.currentEnergyKwh).toBeCloseTo(500 - 7 / 3600, 8);
+  expect(result.batteries[0]?.currentEnergyKwh).toBeCloseTo(100 - 7 / 3600, 8);
   expect(readTickState(cwd).currentTick).toBe(1);
 
   const storedModules = JSON.parse(
     readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
   ) as Array<{ id: string; runtimeAttributes: { currentEnergyKwh?: number } }>;
   const battery = storedModules.find((module) => module.id === "module-battery-1");
-  expect(battery?.runtimeAttributes.currentEnergyKwh).toBeCloseTo(500 - 7 / 3600, 8);
+  expect(battery?.runtimeAttributes.currentEnergyKwh).toBeCloseTo(100 - 7 / 3600, 8);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("tick uses fetched solar irradiance to charge an online battery", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  starterModules[0].runtimeAttributes = {
+    ...starterModules[0].runtimeAttributes,
+    status: "offline",
+    powerDrawKw: { offline: 0, idle: 2, active: 2, damaged: 2 },
+  };
+  starterModules[1].runtimeAttributes = {
+    ...starterModules[1].runtimeAttributes,
+    status: "offline",
+    powerDrawKw: { offline: 0, idle: 5, active: 5, damaged: 5 },
+  };
+  starterModules[2].runtimeAttributes = {
+    ...starterModules[2].runtimeAttributes,
+    status: "online",
+    currentEnergyKwh: 100,
+    energyStorageKwh: 500,
+    powerDrawKw: { offline: 0, idle: 0, online: 0, active: 0, damaged: 0 },
+  };
+  starterModules.push({
+    id: "module-small-solar-array-1",
+    blueprintId: "small-solar-array",
+    displayName: "Small Solar Array",
+    connectedTo: [],
+    runtimeAttributes: {
+      status: "online",
+      powerGenerationKw: 12,
+    },
+    capabilities: ["power-generation"],
+    source: "local" as const,
+  });
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/solar-irradiance": {
+        status: 200,
+        body: {
+          irradianceWPerM2: 500,
+          condition: "partly_sunny",
+        },
+      },
+    },
+    "tick",
+    "1",
+  );
+
+  expect(result.exitCode).toBe(0);
+
+  const storedModules = JSON.parse(
+    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+  ) as Array<{ id: string; runtimeAttributes: { currentEnergyKwh?: number } }>;
+  const battery = storedModules.find((module) => module.id === "module-battery-1");
+  const startingBatteryChargeKwh = 100;
+  const powerGenerationKw = 12;
+  const solarMultiplier = 500 / 900;
+  const solarEfficiency = 0.5;
+  const generatedKwhPerTick = powerGenerationKw * solarMultiplier * solarEfficiency / 3600;
+
+  expect(battery?.runtimeAttributes.currentEnergyKwh).toBeCloseTo(
+    startingBatteryChargeKwh + generatedKwhPerTick,
+    8,
+  );
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("solarGeneratedKwh: 0.000925925926");
+  expect(stdout).toContain("solarChargedKwh: 0.000925925926");
+  expect(stdout).toContain("solarChargingReason: charged online batteries");
+  expect(stdout).toContain("solarSummary: Solar panels charged the online batteries.");
+  expect(stdout).toContain("charge=100.000925925926 / 500 kWh (20.0% full)");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("tick does not charge a battery beyond its energyStorageKwh", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  starterModules[0].runtimeAttributes.status = "offline";
+  starterModules[1].runtimeAttributes.status = "offline";
+  starterModules[2].runtimeAttributes = {
+    ...starterModules[2].runtimeAttributes,
+    status: "online",
+    currentEnergyKwh: 499.999,
+    energyStorageKwh: 500,
+    powerDrawKw: { offline: 0, idle: 0, online: 0, active: 0, damaged: 0 },
+  };
+  starterModules.push({
+    id: "module-small-solar-array-1",
+    blueprintId: "small-solar-array",
+    displayName: "Small Solar Array",
+    connectedTo: [],
+    runtimeAttributes: {
+      status: "online",
+      powerGenerationKw: 12,
+    },
+    capabilities: ["power-generation"],
+    source: "local" as const,
+  });
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/solar-irradiance": {
+        status: 200,
+        body: {
+          irradianceWPerM2: 900,
+          condition: "clear",
+        },
+      },
+    },
+    "tick",
+    "1",
+  );
+
+  expect(result.exitCode).toBe(0);
+
+  const storedModules = JSON.parse(
+    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+  ) as Array<{ id: string; runtimeAttributes: { currentEnergyKwh?: number } }>;
+  const battery = storedModules.find((module) => module.id === "module-battery-1");
+  expect(battery?.runtimeAttributes.currentEnergyKwh).toBe(500);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("solarGeneratedKwh: 0.001666666667");
+  expect(stdout).toContain("solarChargedKwh: 0.001");
+  expect(stdout).toContain("solarChargingReason: battery capacity reached");
+  expect(stdout).toContain("solarSummary: The batteries are full, so extra solar power could not be stored.");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("tick reports why solar charging did not happen when no online batteries exist", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  starterModules[2].runtimeAttributes = {
+    ...starterModules[2].runtimeAttributes,
+    status: "offline",
+    currentEnergyKwh: 100,
+    energyStorageKwh: 500,
+  };
+  starterModules.push({
+    id: "module-small-solar-array-1",
+    blueprintId: "small-solar-array",
+    displayName: "Small Solar Array",
+    connectedTo: [],
+    runtimeAttributes: {
+      status: "online",
+      powerGenerationKw: 12,
+    },
+    capabilities: ["power-generation"],
+    source: "local" as const,
+  });
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/solar-irradiance": {
+        status: 200,
+        body: {
+          irradianceWPerM2: 900,
+          condition: "clear",
+        },
+      },
+    },
+    "tick",
+    "1",
+  );
+
+  expect(result.exitCode).toBe(0);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("solarGeneratedKwh: 0.001666666667");
+  expect(stdout).toContain("solarChargedKwh: 0");
+  expect(stdout).toContain("solarChargingReason: no online battery modules");
+  expect(stdout).toContain("solarSummary: No online batteries were available to store the solar power.");
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -642,7 +922,7 @@ test("ticks reduce remaining build ticks for active construction jobs", () => {
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
     ...module,
     source: "registration" as const,
   }));
@@ -665,7 +945,7 @@ test("ticks reduce remaining build ticks for active construction jobs", () => {
       buildTicks: 180,
       remainingBuildTicks: 180,
       futureDisplayName: "Small Solar Array",
-      futureRuntimeAttributes: { status: "online", health: 100 },
+      futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
       futureCapabilities: ["power-generation"],
     },
   };
@@ -732,7 +1012,7 @@ test("tick completes construction jobs, creates the output module, and frees the
       buildTicks: 3,
       remainingBuildTicks: 2,
       futureDisplayName: "Small Solar Array",
-      futureRuntimeAttributes: { status: "online", health: 100 },
+      futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
       futureCapabilities: ["power-generation"],
     },
   };
@@ -755,11 +1035,28 @@ test("tick completes construction jobs, creates the output module, and frees the
     `${JSON.stringify(starterModules, null, 2)}\n`,
   );
 
-  const result = runCli(cwd, "tick", "--count", "2");
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/solar-irradiance": {
+        status: 200,
+        body: {
+          irradianceWPerM2: 0,
+          condition: "night",
+        },
+      },
+    },
+    "tick",
+    "2",
+  );
 
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toContain("constructionCompleted:");
   expect(result.stdout.toString()).toContain("module-small-solar-array-1");
+  expect(result.stdout.toString()).toContain("solarGeneratedKwh: 0");
+  expect(result.stdout.toString()).toContain("solarChargedKwh: 0");
+  expect(result.stdout.toString()).toContain("solarChargingReason: no solar irradiance");
+  expect(result.stdout.toString()).toContain("solarSummary: No sunlight reached the habitat, so solar charging could not happen.");
 
   const storedModules = JSON.parse(
     readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
@@ -767,6 +1064,7 @@ test("tick completes construction jobs, creates the output module, and frees the
     id: string;
     blueprintId: string;
     displayName: string;
+    connectedTo: string[];
     runtimeAttributes: Record<string, unknown>;
     capabilities: string[];
     source: string;
@@ -783,10 +1081,110 @@ test("tick completes construction jobs, creates the output module, and frees the
     blueprintId: "small-solar-array",
     displayName: "Small Solar Array",
     connectedTo: [],
-    runtimeAttributes: { status: "online", health: 100 },
+    runtimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
     capabilities: ["power-generation"],
     source: "local",
   });
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("tick can charge a battery after completing a small solar array construction job", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  starterModules[2].runtimeAttributes = {
+    ...starterModules[2].runtimeAttributes,
+    status: "online",
+    currentEnergyKwh: 100,
+    energyStorageKwh: 500,
+    powerDrawKw: { offline: 0, idle: 0, online: 0, active: 0, damaged: 0 },
+  };
+  starterModules[4].runtimeAttributes = {
+    ...starterModules[4].runtimeAttributes,
+    status: "active",
+    powerDrawKw: { offline: 0, idle: 0, online: 0, active: 0, damaged: 0 },
+    constructionJobId: "job-small-solar-array-1",
+    constructionJob: {
+      id: "job-small-solar-array-1",
+      blueprintId: "small-solar-array",
+      outputModuleId: "module-small-solar-array-1",
+      buildTicks: 2,
+      remainingBuildTicks: 1,
+      futureDisplayName: "Small Solar Array",
+      futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
+      futureCapabilities: ["power-generation"],
+    },
+  };
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/solar-irradiance": {
+        status: 200,
+        body: {
+          irradianceWPerM2: 900,
+          condition: "clear",
+        },
+      },
+    },
+    "tick",
+    "2",
+  );
+
+  expect(result.exitCode).toBe(0);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("constructionCompleted: module-small-solar-array-1");
+  expect(stdout).toContain("solarGeneratedKwh: 0.001666666667");
+  expect(stdout).toContain("solarChargedKwh: 0.001666666667");
+  expect(stdout).toContain("solarChargingReason: charged online batteries");
+  expect(stdout).toContain("solarSummary: Solar panels charged the online batteries.");
+
+  const storedModules = JSON.parse(
+    readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
+  ) as Array<{
+    id: string;
+    blueprintId: string;
+    runtimeAttributes: Record<string, unknown>;
+    capabilities: string[];
+  }>;
+  const completedModule = storedModules.find((module) => module.id === "module-small-solar-array-1");
+  const battery = storedModules.find((module) => module.id === "module-battery-1");
+  const generatedKwhPerTick = (12 * (900 / 900) * 0.5) / 3600;
+
+  expect(completedModule).toMatchObject({
+    id: "module-small-solar-array-1",
+    blueprintId: "small-solar-array",
+    displayName: "Small Solar Array",
+    connectedTo: [],
+    runtimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
+    capabilities: ["power-generation"],
+    source: "local",
+  });
+  expect(battery?.runtimeAttributes.currentEnergyKwh).toBeCloseTo(100 + generatedKwhPerTick, 8);
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -796,7 +1194,7 @@ test("planConstruction reports constructibility without mutating local state", (
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
     ...module,
     source: "registration" as const,
   }));
@@ -1020,7 +1418,7 @@ test("construct starts a local construction job from the Kepler blueprint and sp
     buildTicks: 120,
     remainingBuildTicks: 120,
     futureDisplayName: "Small Solar Array",
-    futureRuntimeAttributes: { status: "online", health: 100 },
+    futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
     futureCapabilities: ["power-generation"],
   });
 
@@ -1289,7 +1687,7 @@ test("construction cancel clears the stored job, frees the fabricator, and does 
       buildTicks: 180,
       remainingBuildTicks: 180,
       futureDisplayName: "Small Solar Array",
-      futureRuntimeAttributes: { status: "online", health: 100 },
+      futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
       futureCapabilities: ["power-generation"],
     },
   };
@@ -1359,7 +1757,7 @@ test("construction cancel removes the job so construction status reports none", 
       buildTicks: 180,
       remainingBuildTicks: 180,
       futureDisplayName: "Small Solar Array",
-      futureRuntimeAttributes: { status: "online", health: 100 },
+      futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
       futureCapabilities: ["power-generation"],
     },
   };
@@ -1412,7 +1810,7 @@ test("construction cancel accepts the generated fabricator name workshop-fabrica
       buildTicks: 180,
       remainingBuildTicks: 180,
       futureDisplayName: "Small Solar Array",
-      futureRuntimeAttributes: { status: "online", health: 100 },
+      futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
       futureCapabilities: ["power-generation"],
     },
   };
@@ -1463,7 +1861,7 @@ test("module show presents active construction job details clearly for generated
       buildTicks: 180,
       remainingBuildTicks: 120,
       futureDisplayName: "Small Solar Array",
-      futureRuntimeAttributes: { status: "online", health: 100 },
+      futureRuntimeAttributes: { status: "online", health: 100, powerGenerationKw: 12 },
       futureCapabilities: ["power-generation"],
     },
   };
@@ -1546,6 +1944,7 @@ test("module show presents battery details clearly for generated battery names",
   expect(stdout).toContain("declaredStatus: online");
   expect(stdout).toContain("effectiveState: online");
   expect(stdout).toContain("battery:");
+  expect(stdout).toContain("current charge: 420 / 500 kWh (84.0% full)");
   expect(stdout).toContain("currentEnergyKwh: 420");
   expect(stdout).toContain("energyStorageKwh: 500");
   expect(stdout).toContain("reserveKwh: 75");
@@ -1559,7 +1958,7 @@ test("module show presents completed small solar array attributes clearly for ge
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+  const starterModules: LocalHabitatModule[] = createRegistrationPayload().starterModules.map((module) => ({
     ...module,
     source: "registration" as const,
   }));
@@ -1605,10 +2004,57 @@ test("module show presents completed small solar array attributes clearly for ge
   expect(stdout).toContain("capabilities: [\"power-generation\"]");
   expect(stdout).toContain("declaredStatus: online");
   expect(stdout).toContain("effectiveState: online");
+  expect(stdout).toContain("solar panel:");
+  expect(stdout).toContain("peak generation: 12 kW");
+  expect(stdout).toContain("capability: power-generation");
   expect(stdout).toContain("powerGenerationKw: 12");
   expect(stdout).toContain("degradedStormGenerationKw: 4");
   expect(stdout).toContain("maintenanceHoursPer100Ticks: 2");
   expect(stdout).toContain("surfaceAreaM2: 24");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("module list prints a clean table with alias, module name, blueprint id, and source", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+
+  writeFileSync(
+    path.join(habitatDirectory, "registration.json"),
+    `${JSON.stringify(
+      {
+        displayName: "Starlight Forge",
+        habitatUuid: "11111111-1111-4111-8111-111111111111",
+        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+        baseUrl: "https://planet.turingguild.com",
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(starterModules, null, 2)}\n`,
+  );
+
+  const result = runCli(cwd, "module", "list");
+
+  expect(result.exitCode).toBe(0);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("Alias");
+  expect(stdout).toContain("Module Name");
+  expect(stdout).toContain("Blueprint ID");
+  expect(stdout).toContain("Source");
+  expect(stdout).toContain("cm-1");
+  expect(stdout).toContain("Command Module");
+  expect(stdout).toContain("command-module");
+  expect(stdout).toContain("registration");
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -1619,6 +2065,31 @@ test("CLI help shows the tick command", () => {
 
   expect(result.exitCode).toBe(0);
   expect(result.stdout.toString()).toContain("tick");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("solar status prints current Kepler irradiance in beginner-friendly language", () => {
+  const cwd = createWorkspace();
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/solar-irradiance": {
+        status: 200,
+        body: createSolarIrradiancePayload(),
+      },
+    },
+    "solar",
+    "status",
+  );
+
+  expect(result.exitCode).toBe(0);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("current sunlight: 800 W/m2");
+  expect(stdout).toContain("condition: clear");
+  expect(stdout).toContain("Kepler world sunlight: this is the remote solar reading for your habitat.");
+  expect(stdout).toContain("Local batteries and module state stay in your habitat CLI.");
+  expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
 
   rmSync(cwd, { recursive: true, force: true });
 });

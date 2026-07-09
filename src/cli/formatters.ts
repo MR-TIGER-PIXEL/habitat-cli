@@ -5,6 +5,7 @@ import {
   type LocalInventoryEntry,
   type LocalHabitatModule,
   type OfficialResource,
+  type SolarIrradiance,
   type StartedConstruction,
   type StoredBlueprint,
 } from "../kepler";
@@ -21,6 +22,37 @@ function printAlignedTable(headers: string[], rows: string[][]): void {
   console.log(widths.map((width) => "-".repeat(width)).join("  "));
   for (const row of rows) {
     console.log(formatRow(row));
+  }
+}
+
+function formatKwh(value: number): string {
+  return value.toFixed(12).replace(/\.?0+$/, "");
+}
+
+function formatKw(value: number): string {
+  return value.toFixed(12).replace(/\.?0+$/, "");
+}
+
+function formatBatteryCharge(currentEnergyKwh: number, energyStorageKwh: number): string {
+  const percentFull =
+    energyStorageKwh > 0 ? ((currentEnergyKwh / energyStorageKwh) * 100).toFixed(1) : "0.0";
+  return `${formatKwh(currentEnergyKwh)} / ${formatKwh(energyStorageKwh)} kWh (${percentFull}% full)`;
+}
+
+function describeSolarChargingReason(reason: string): string {
+  switch (reason) {
+    case "charged online batteries":
+      return "Solar panels charged the online batteries.";
+    case "battery capacity reached":
+      return "The batteries are full, so extra solar power could not be stored.";
+    case "no online battery modules":
+      return "No online batteries were available to store the solar power.";
+    case "no online solar generation modules":
+      return "No online solar panels were available to generate power.";
+    case "no solar irradiance":
+      return "No sunlight reached the habitat, so solar charging could not happen.";
+    default:
+      return "Solar charging did not happen.";
   }
 }
 
@@ -72,10 +104,16 @@ export function printTickResult(result: {
   startTick: number;
   endTick: number;
   totalEnergyUsedKwh: number;
+  solarCharging: {
+    generatedKwh: number;
+    chargedKwh: number;
+    reason: string;
+  };
   batteries: Array<{
     alias: string;
     id: string;
     currentEnergyKwh: number;
+    energyStorageKwh: number;
   }>;
   completedConstructions: Array<{
     fabricatorId: string;
@@ -87,6 +125,10 @@ export function printTickResult(result: {
   console.log(`endTick: ${result.endTick}`);
   console.log(`ticksAdvanced: ${count}`);
   console.log(`totalEnergyUsedKwh: ${result.totalEnergyUsedKwh}`);
+  console.log(`solarGeneratedKwh: ${formatKwh(result.solarCharging.generatedKwh)}`);
+  console.log(`solarChargedKwh: ${formatKwh(result.solarCharging.chargedKwh)}`);
+  console.log(`solarChargingReason: ${result.solarCharging.reason}`);
+  console.log(`solarSummary: ${describeSolarChargingReason(result.solarCharging.reason)}`);
 
   for (const completed of result.completedConstructions) {
     console.log(
@@ -101,7 +143,9 @@ export function printTickResult(result: {
 
   console.log("batteries:");
   for (const battery of result.batteries) {
-    console.log(`- ${battery.alias} | id=${battery.id} | currentEnergyKwh=${battery.currentEnergyKwh}`);
+    console.log(
+      `- ${battery.alias} | charge=${formatBatteryCharge(battery.currentEnergyKwh, battery.energyStorageKwh)} | id=${battery.id}`,
+    );
   }
 }
 
@@ -111,9 +155,18 @@ export function printModuleList(modules: LocalHabitatModule[]): void {
     return;
   }
 
-  for (const module of modules) {
-    console.log(formatModuleListEntry(module, modules));
-  }
+  printAlignedTable(
+    ["Alias", "Module Name", "Blueprint ID", "Source"],
+    modules.map((module) => {
+      const [alias, displayName, blueprintId, sourcePart] = formatModuleListEntry(module, modules).split(" | ");
+      return [
+        alias ?? "",
+        displayName ?? "",
+        blueprintId ?? "",
+        sourcePart?.replace(/^source=/, "") ?? "",
+      ];
+    }),
+  );
 }
 
 export function printModuleStatus(result: {
@@ -190,6 +243,15 @@ export function printModuleDetails(
   const batteryDetails = batteryDetailKeys.filter((key) => typeof module.runtimeAttributes[key] === "number");
   if (batteryDetails.length > 0) {
     console.log("battery:");
+    if (typeof module.runtimeAttributes.currentEnergyKwh === "number") {
+      const currentEnergyKwh = module.runtimeAttributes.currentEnergyKwh;
+      const energyStorageKwh =
+        typeof module.runtimeAttributes.energyStorageKwh === "number"
+          ? module.runtimeAttributes.energyStorageKwh
+          : currentEnergyKwh;
+
+      console.log(`  current charge: ${formatBatteryCharge(currentEnergyKwh, energyStorageKwh)}`);
+    }
     for (const key of batteryDetails) {
       console.log(`  ${key}: ${String(module.runtimeAttributes[key])}`);
     }
@@ -199,6 +261,34 @@ export function printModuleDetails(
     if (typeof module.runtimeAttributes[key] === "number") {
       console.log(`${key}: ${String(module.runtimeAttributes[key])}`);
     }
+  }
+
+  if (typeof module.runtimeAttributes.powerGenerationKw === "number") {
+    console.log("solar panel:");
+    console.log(`  peak generation: ${formatKw(module.runtimeAttributes.powerGenerationKw)} kW`);
+    if (typeof module.runtimeAttributes.degradedStormGenerationKw === "number") {
+      console.log(
+        `  storm generation: ${formatKw(module.runtimeAttributes.degradedStormGenerationKw)} kW`,
+      );
+    }
+    if (typeof module.runtimeAttributes.surfaceAreaM2 === "number") {
+      console.log(`  surface area: ${formatKw(module.runtimeAttributes.surfaceAreaM2)} m2`);
+    }
+    if (
+      module.capabilities.includes("power-generation")
+      && typeof module.runtimeAttributes.powerGenerationKw === "number"
+    ) {
+      console.log("  capability: power-generation");
+    }
+  }
+
+  if (
+    declaredStatus === "offline"
+    && typeof module.runtimeAttributes.currentEnergyKwh === "number"
+  ) {
+    console.log("note: this battery is offline, so solar charging will skip it.");
+  } else if (declaredStatus === "offline" && typeof module.runtimeAttributes.powerGenerationKw === "number") {
+    console.log("note: this solar panel is offline, so it will not generate power right now.");
   }
 
   console.log(`runtimeAttributes: ${JSON.stringify(module.runtimeAttributes)}`);
@@ -355,6 +445,13 @@ export function printResourceList(result: {
   console.log("resource catalog: possible resource types in the Kepler world");
   console.log("local inventory: resources your habitat owns, handled later");
   console.log("blueprint requirements: resources or modules needed to build something later");
+}
+
+export function printSolarStatus(result: SolarIrradiance): void {
+  console.log(`current sunlight: ${result.irradianceWPerM2} W/m2`);
+  console.log(`condition: ${result.condition}`);
+  console.log("Kepler world sunlight: this is the remote solar reading for your habitat.");
+  console.log("Local batteries and module state stay in your habitat CLI.");
 }
 
 export function printUnregisterSuccess(displayName: string): void {

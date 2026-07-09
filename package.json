@@ -9,7 +9,8 @@
   "scripts": {
     "habitat": "./habitat",
     "start": "./habitat",
-    "test": "bun test"
+    "test": "bun test",
+    "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
     "commander": "^14.0.0"

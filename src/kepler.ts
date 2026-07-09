@@ -112,6 +112,11 @@ type ResourceCatalogResponse = {
   resources: OfficialResource[];
 };
 
+export type SolarIrradiance = {
+  irradianceWPerM2: number;
+  condition: string;
+};
+
 export type ModuleCreateInput = {
   id: string;
   blueprintId: string;
@@ -136,12 +141,19 @@ export type TickBatterySummary = {
   id: string;
   alias: string;
   currentEnergyKwh: number;
+  energyStorageKwh: number;
 };
 
 export type CompletedConstruction = {
   fabricatorId: string;
   outputModuleId: string;
   blueprintId: string;
+};
+
+export type SolarChargingSummary = {
+  generatedKwh: number;
+  chargedKwh: number;
+  reason: string;
 };
 
 export type ModulePowerStatusRow = {
@@ -370,6 +382,12 @@ export async function listOfficialResources(config: CliConfig): Promise<Resource
   });
 }
 
+export async function getSolarIrradiance(config: CliConfig): Promise<SolarIrradiance> {
+  return requestJson<SolarIrradiance>(config, "/world/solar-irradiance", {
+    method: "GET",
+  });
+}
+
 export async function getOfficialBlueprint(
   config: CliConfig,
   blueprintId: string,
@@ -514,10 +532,12 @@ export function setModuleStatus(
 export function runPowerTicks(
   config: CliConfig,
   count: number,
+  solarIrradiance?: SolarIrradiance,
 ): {
   startTick: number;
   endTick: number;
   totalEnergyUsedKwh: number;
+  solarCharging: SolarChargingSummary;
   batteries: TickBatterySummary[];
   completedConstructions: CompletedConstruction[];
 } {
@@ -531,19 +551,24 @@ export function runPowerTicks(
   const state = readTickState(config.cwd);
   const startTick = state.currentTick;
   let totalEnergyUsedKwh = 0;
+  let totalSolarGeneratedKwh = 0;
+  let totalSolarChargedKwh = 0;
   const completedConstructions: CompletedConstruction[] = [];
 
   for (let tick = 0; tick < count; tick += 1) {
-    const tickEnergyUsedKwh = modules.reduce(
-      (sum, module) => sum + getModuleCurrentPowerDrawKw(module) / 3600,
-      0,
-    );
+    const tickLoadKw = modules.reduce((sum, module) => sum + getModuleCurrentPowerDrawKw(module), 0);
+    const tickEnergyUsedKwh = tickLoadKw / 3600;
+    // One tick is one simulated second, so kW values become kWh/tick by dividing by 3600.
+    const generatedKwhPerTick = getGeneratedSolarEnergyKwhPerTick(modules, solarIrradiance);
 
     drainBatteries(modules, tickEnergyUsedKwh);
-    if (hasUsablePower(modules)) {
+    const chargedKwh = chargeBatteries(modules, generatedKwhPerTick);
+    if (hasUsablePower(modules, solarIrradiance)) {
       completedConstructions.push(...advanceConstructionJobs(modules));
     }
     totalEnergyUsedKwh += tickEnergyUsedKwh;
+    totalSolarGeneratedKwh += generatedKwhPerTick;
+    totalSolarChargedKwh += chargedKwh;
     state.currentTick += 1;
   }
 
@@ -556,12 +581,23 @@ export function runPowerTicks(
       id: module.id,
       alias: getModuleAlias(module, modules),
       currentEnergyKwh: getBatteryEnergy(module),
+      energyStorageKwh: getBatteryCapacity(module),
     }));
 
   return {
     startTick,
     endTick: state.currentTick,
     totalEnergyUsedKwh,
+    solarCharging: {
+      generatedKwh: totalSolarGeneratedKwh,
+      chargedKwh: totalSolarChargedKwh,
+      reason: getSolarChargingReason(
+        modules,
+        solarIrradiance,
+        totalSolarGeneratedKwh,
+        totalSolarChargedKwh,
+      ),
+    },
     batteries,
     completedConstructions,
   };
@@ -1149,6 +1185,12 @@ function getBatteryEnergy(module: LocalHabitatModule): number {
     : 0;
 }
 
+function getBatteryCapacity(module: LocalHabitatModule): number {
+  return typeof module.runtimeAttributes.energyStorageKwh === "number"
+    ? module.runtimeAttributes.energyStorageKwh
+    : 0;
+}
+
 function drainBatteries(modules: LocalHabitatModule[], energyUsedKwh: number): void {
   if (energyUsedKwh <= 0) {
     return;
@@ -1175,14 +1217,52 @@ function drainBatteries(modules: LocalHabitatModule[], energyUsedKwh: number): v
   }
 }
 
+function chargeBatteries(modules: LocalHabitatModule[], generatedKwhPerTick: number): number {
+  if (generatedKwhPerTick <= 0) {
+    return 0;
+  }
+
+  const batteries = modules.filter((module) =>
+    isBatteryModule(module) && getDisplayedModuleStatus(module) !== "offline"
+  );
+
+  const totalRemainingCapacity = batteries.reduce((sum, battery) => {
+    const remainingCapacity = Math.max(0, getBatteryCapacity(battery) - getBatteryEnergy(battery));
+    return sum + remainingCapacity;
+  }, 0);
+
+  if (totalRemainingCapacity <= 0) {
+    return 0;
+  }
+
+  let totalChargedKwh = 0;
+  for (const battery of batteries) {
+    const currentEnergy = getBatteryEnergy(battery);
+    const energyStorageKwh = getBatteryCapacity(battery);
+    const remainingCapacity = Math.max(0, energyStorageKwh - currentEnergy);
+    const share = remainingCapacity / totalRemainingCapacity;
+    const charged = generatedKwhPerTick * share;
+    const newEnergy = Math.min(
+      energyStorageKwh,
+      currentEnergy + charged,
+    );
+    battery.runtimeAttributes.currentEnergyKwh = newEnergy;
+    totalChargedKwh += newEnergy - currentEnergy;
+  }
+
+  return totalChargedKwh;
+}
+
 function getBlueprintInputResources(blueprint: StoredBlueprint): ConstructionMaterialMap {
   if (!blueprint.inputs || typeof blueprint.inputs !== "object" || Array.isArray(blueprint.inputs)) {
     return {};
   }
 
-  return Object.fromEntries(
-    Object.entries(blueprint.inputs).filter(([, amount]) => typeof amount === "number"),
+  const numericEntries = Object.entries(blueprint.inputs).filter(
+    (entry): entry is [string, number] => typeof entry[1] === "number",
   );
+
+  return Object.fromEntries(numericEntries);
 }
 
 function getRequiredFacilityBlueprintId(blueprint: StoredBlueprint): string | null {
@@ -1190,12 +1270,109 @@ function getRequiredFacilityBlueprintId(blueprint: StoredBlueprint): string | nu
   return typeof moduleType === "string" && moduleType.length > 0 ? moduleType : null;
 }
 
-function hasUsablePower(modules: LocalHabitatModule[]): boolean {
+function hasUsablePower(modules: LocalHabitatModule[], solarIrradiance?: SolarIrradiance): boolean {
   return modules.some((module) =>
     isBatteryModule(module)
     && getDisplayedModuleStatus(module) !== "offline"
     && getBatteryEnergy(module) > 0
+  ) || getTotalSolarGenerationKw(modules, solarIrradiance) > 0;
+}
+
+function getSolarChargingReason(
+  modules: LocalHabitatModule[],
+  solarIrradiance: SolarIrradiance | undefined,
+  generatedKwh: number,
+  chargedKwh: number,
+): string {
+  const chargingToleranceKwh = 1e-12;
+  const irradianceWPerM2 =
+    solarIrradiance && typeof solarIrradiance.irradianceWPerM2 === "number"
+      ? solarIrradiance.irradianceWPerM2
+      : 0;
+
+  if (irradianceWPerM2 <= 0) {
+    return "no solar irradiance";
+  }
+
+  if (!hasOnlineSolarGenerationModule(modules)) {
+    return "no online solar generation modules";
+  }
+
+  if (!hasOnlineBatteryModule(modules)) {
+    return "no online battery modules";
+  }
+
+  // Treat tiny floating-point differences as equal so successful charging
+  // doesn't get mislabeled as a partial-capacity edge case.
+  if (generatedKwh > 0 && generatedKwh - chargedKwh > chargingToleranceKwh) {
+    return "battery capacity reached";
+  }
+
+  if (chargedKwh > 0) {
+    return "charged online batteries";
+  }
+
+  return "no solar generation";
+}
+
+function hasOnlineSolarGenerationModule(modules: LocalHabitatModule[]): boolean {
+  return modules.some((module) =>
+    module.capabilities.includes("power-generation")
+    && getDisplayedModuleStatus(module) !== "offline"
+    && typeof module.runtimeAttributes.powerGenerationKw === "number"
+    && module.runtimeAttributes.powerGenerationKw > 0
   );
+}
+
+function hasOnlineBatteryModule(modules: LocalHabitatModule[]): boolean {
+  return modules.some((module) =>
+    isBatteryModule(module) && getDisplayedModuleStatus(module) !== "offline"
+  );
+}
+
+function getTotalSolarGenerationKw(
+  modules: LocalHabitatModule[],
+  solarIrradiance?: SolarIrradiance,
+): number {
+  return getGeneratedSolarEnergyKwhPerTick(modules, solarIrradiance) * 3600;
+}
+
+function getGeneratedSolarEnergyKwhPerTick(
+  modules: LocalHabitatModule[],
+  solarIrradiance?: SolarIrradiance,
+): number {
+  const irradianceWPerM2 =
+    solarIrradiance && typeof solarIrradiance.irradianceWPerM2 === "number"
+      ? solarIrradiance.irradianceWPerM2
+      : 0;
+
+  if (irradianceWPerM2 <= 0) {
+    return 0;
+  }
+
+  const solarMultiplier = irradianceWPerM2 / 900;
+  const solarEfficiency = 0.5;
+
+  return modules.reduce((sum, module) => {
+    if (
+      !module.capabilities.includes("power-generation")
+      || getDisplayedModuleStatus(module) === "offline"
+    ) {
+      return sum;
+    }
+
+    const peakGenerationKw = module.runtimeAttributes.powerGenerationKw;
+    if (typeof peakGenerationKw !== "number" || peakGenerationKw <= 0) {
+      return sum;
+    }
+
+    // First-version lab rule:
+    //   solarMultiplier = irradianceWPerM2 / 900
+    //   generatedKwhPerTick = powerGenerationKw * solarMultiplier * 0.5 / 3600
+    // This keeps the math simple: lower irradiance means less charge, zero irradiance means no charge,
+    // and the result stays in the same per-second tick units used elsewhere in the CLI.
+    return sum + Math.max(0, (peakGenerationKw * solarMultiplier * solarEfficiency) / 3600);
+  }, 0);
 }
 
 function generateOutputModuleId(modules: LocalHabitatModule[], blueprintId: string): string {

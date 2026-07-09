@@ -68,7 +68,7 @@ export function printRegistrationSuccess(result: {
   console.log(`habitatId: ${result.registration.habitatId}`);
   console.log(`habitatUuid: ${result.registration.habitatUuid}`);
   console.log(`moduleCount: ${result.modules.length}`);
-  console.log("saved: .habitat/registration.json");
+  console.log("saved: .habitat/habitat.sqlite");
   console.log("saved: .habitat/modules.json");
   console.log("saved: .habitat/blueprints.json");
 }
@@ -456,7 +456,7 @@ export function printSolarStatus(result: SolarIrradiance): void {
 
 export function printUnregisterSuccess(displayName: string): void {
   console.log(`Unregistered habitat "${displayName}".`);
-  console.log("removed: .habitat/registration.json");
+  console.log("removed: .habitat/habitat.sqlite");
   console.log("removed: .habitat/modules.json");
   console.log("removed: .habitat/blueprints.json");
 }

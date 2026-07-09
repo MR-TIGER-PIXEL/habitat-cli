@@ -1,5 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 
 export type FetchLike = typeof fetch;
 
@@ -234,7 +235,7 @@ export type CanceledConstruction = {
 
 const DEFAULT_BASE_URL = "https://planet.turingguild.com";
 const HABITAT_DIRECTORY = ".habitat";
-const REGISTRATION_FILE = "registration.json";
+const HABITAT_DATABASE = "habitat.sqlite";
 const MODULES_FILE = "modules.json";
 const BLUEPRINTS_FILE = "blueprints.json";
 const INVENTORY_FILE = "inventory.json";
@@ -1061,8 +1062,8 @@ function getHabitatDirectory(cwd: string): string {
   return path.join(cwd, HABITAT_DIRECTORY);
 }
 
-function getRegistrationPath(cwd: string): string {
-  return path.join(getHabitatDirectory(cwd), REGISTRATION_FILE);
+function getDatabasePath(cwd: string): string {
+  return path.join(getHabitatDirectory(cwd), HABITAT_DATABASE);
 }
 
 function getModulesPath(cwd: string): string {
@@ -1088,13 +1089,29 @@ function ensureHabitatDirectory(cwd: string): void {
   }
 }
 
-function readStoredRegistration(cwd: string): RegistrationRecord | null {
-  const registrationPath = getRegistrationPath(cwd);
-  if (!existsSync(registrationPath)) {
-    return null;
-  }
+function openHabitatDatabase(cwd: string): Database {
+  ensureHabitatDirectory(cwd);
+  const database = new Database(getDatabasePath(cwd));
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS registration (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      display_name TEXT NOT NULL,
+      habitat_uuid TEXT NOT NULL,
+      habitat_id TEXT NOT NULL,
+      base_url TEXT NOT NULL
+    );
+  `);
+  return database;
+}
 
-  return JSON.parse(readFileSync(registrationPath, "utf8")) as RegistrationRecord;
+function readStoredRegistration(cwd: string): RegistrationRecord | null {
+  const database = openHabitatDatabase(cwd);
+  const row = database
+    .query<RegistrationRecord, []>(
+      "SELECT display_name AS displayName, habitat_uuid AS habitatUuid, habitat_id AS habitatId, base_url AS baseUrl FROM registration WHERE id = 1",
+    )
+    .get();
+  return row ?? null;
 }
 
 function requireStoredRegistration(cwd: string): RegistrationRecord {
@@ -1110,7 +1127,18 @@ function requireStoredRegistration(cwd: string): RegistrationRecord {
 
 function writeStoredRegistration(cwd: string, registration: RegistrationRecord): void {
   ensureHabitatDirectory(cwd);
-  writeFileSync(getRegistrationPath(cwd), `${JSON.stringify(registration, null, 2)}\n`);
+  const database = openHabitatDatabase(cwd);
+  database
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         display_name = excluded.display_name,
+         habitat_uuid = excluded.habitat_uuid,
+         habitat_id = excluded.habitat_id,
+         base_url = excluded.base_url`,
+    )
+    .run(registration.displayName, registration.habitatUuid, registration.habitatId, registration.baseUrl);
 }
 
 function readStoredModules(cwd: string): LocalHabitatModule[] {
@@ -1162,7 +1190,7 @@ function writeTickState(cwd: string, state: TickState): void {
 
 function deleteStoredState(cwd: string): void {
   for (const filePath of [
-    getRegistrationPath(cwd),
+    getDatabasePath(cwd),
     getModulesPath(cwd),
     getBlueprintsPath(cwd),
     getInventoryPath(cwd),

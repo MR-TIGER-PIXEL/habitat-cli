@@ -1,4 +1,5 @@
 import { expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -251,6 +252,20 @@ function createSolarIrradiancePayload() {
   };
 }
 
+function createRegistrationDatabase(habitatDirectory: string): Database {
+  const database = new Database(path.join(habitatDirectory, "habitat.sqlite"));
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS registration (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      display_name TEXT NOT NULL,
+      habitat_uuid TEXT NOT NULL,
+      habitat_id TEXT NOT NULL,
+      base_url TEXT NOT NULL
+    );
+  `);
+  return database;
+}
+
 test("register stores registration, hydrated starter modules, and blueprint lookups", async () => {
   const cwd = createWorkspace();
   const requests: Array<{ url: string; method: string; body?: unknown }> = [];
@@ -292,9 +307,23 @@ test("register stores registration, hydrated starter modules, and blueprint look
   ]);
 
   const habitatDirectory = path.join(cwd, ".habitat");
-  expect(existsSync(path.join(habitatDirectory, "registration.json"))).toBe(true);
+  expect(existsSync(path.join(habitatDirectory, "habitat.sqlite"))).toBe(true);
+  expect(existsSync(path.join(habitatDirectory, "registration.json"))).toBe(false);
   expect(existsSync(path.join(habitatDirectory, "modules.json"))).toBe(true);
   expect(existsSync(path.join(habitatDirectory, "blueprints.json"))).toBe(true);
+
+  const database = createRegistrationDatabase(habitatDirectory);
+  const storedRegistration = database
+    .query<{
+      displayName: string;
+      habitatUuid: string;
+      habitatId: string;
+      baseUrl: string;
+    }, []>(
+      "SELECT display_name AS displayName, habitat_uuid AS habitatUuid, habitat_id AS habitatId, base_url AS baseUrl FROM registration WHERE id = 1",
+    )
+    .get();
+  expect(storedRegistration).toEqual(result.registration);
 
   const storedModules = JSON.parse(
     readFileSync(path.join(habitatDirectory, "modules.json"), "utf8"),
@@ -318,19 +347,18 @@ test("status includes remote habitat details and local module count", async () =
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  const database = createRegistrationDatabase(habitatDirectory);
+  database
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`,
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
 
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
@@ -510,19 +538,17 @@ test("module CRUD works against local hydrated module state", async () => {
     source: "registration" as const,
   }));
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -628,19 +654,17 @@ test("power-only ticks drain battery energy and advance currentTick", async () =
     powerDrawKw: { offline: 0, idle: 0.5, active: 2, damaged: 0.5 },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -707,19 +731,17 @@ test("tick uses fetched solar irradiance to charge an online battery", () => {
     source: "local" as const,
   });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -797,19 +819,17 @@ test("tick does not charge a battery beyond its energyStorageKwh", () => {
     source: "local" as const,
   });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -874,19 +894,17 @@ test("tick reports why solar charging did not happen when no online batteries ex
     source: "local" as const,
   });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -950,19 +968,17 @@ test("ticks reduce remaining build ticks for active construction jobs", () => {
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1017,19 +1033,17 @@ test("tick completes construction jobs, creates the output module, and frees the
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1122,19 +1136,17 @@ test("tick can charge a battery after completing a small solar array constructio
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1209,19 +1221,17 @@ test("planConstruction reports constructibility without mutating local state", (
     "small-solar-array": createConstructibleBlueprintPayload(),
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1282,19 +1292,17 @@ test("construct dry-run reports blocked requirements and exits without mutating 
     constructionJobId: "job-1",
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1350,19 +1358,17 @@ test("construct starts a local construction job from the Kepler blueprint and sp
     energyStorageKwh: 500,
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1446,19 +1452,17 @@ test("construct leaves local state unchanged when fetched Kepler blueprint canno
     constructionJobId: "job-existing",
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1496,19 +1500,17 @@ test("inventory add stores local resource quantities without Kepler validation",
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
 
   const firstAdd = runCli(cwd, "inventory", "add", "ferrite", "90");
   const secondAdd = runCli(cwd, "inventory", "add", "silicate-glass", "45");
@@ -1538,19 +1540,17 @@ test("inventory list prints the local habitat inventory", () => {
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "inventory.json"),
     `${JSON.stringify(
@@ -1602,19 +1602,17 @@ test("construction status prints active local construction jobs", () => {
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1638,19 +1636,17 @@ test("construction status prints a friendly message when no active jobs exist", 
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(createRegistrationPayload().starterModules.map((module) => ({
@@ -1692,19 +1688,17 @@ test("construction cancel clears the stored job, frees the fabricator, and does 
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1762,19 +1756,17 @@ test("construction cancel removes the job so construction status reports none", 
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1815,19 +1807,17 @@ test("construction cancel accepts the generated fabricator name workshop-fabrica
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1866,19 +1856,17 @@ test("module show presents active construction job details clearly for generated
     },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1918,19 +1906,17 @@ test("module show presents battery details clearly for generated battery names",
     maxPowerOutputKw: 30,
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -1978,19 +1964,17 @@ test("module show presents completed small solar array attributes clearly for ge
     source: "local",
   });
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -2025,19 +2009,17 @@ test("module list prints a clean table with alias, module name, blueprint id, an
     source: "registration" as const,
   }));
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -2253,19 +2235,17 @@ test("module status shows module states, current power draw, and summary totals"
     powerDrawKw: { offline: 0, idle: 0.5, active: 2, damaged: 0.5 },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -2308,19 +2288,17 @@ test("module set-status updates only the runtime status and reports current powe
     powerDrawKw: { offline: 0, idle: 2, online: 1, active: 4, damaged: 0.5 },
   };
 
-  writeFileSync(
-    path.join(habitatDirectory, "registration.json"),
-    `${JSON.stringify(
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-      null,
-      2,
-    )}\n`,
-  );
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
   writeFileSync(
     path.join(habitatDirectory, "modules.json"),
     `${JSON.stringify(starterModules, null, 2)}\n`,
@@ -2354,21 +2332,26 @@ test("unregister removes registration, modules, and blueprints files", async () 
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
 
-  for (const [fileName, contents] of [
-    [
-      "registration.json",
-      {
-        displayName: "Starlight Forge",
-        habitatUuid: "11111111-1111-4111-8111-111111111111",
-        habitatId: "habitat_11111111_1111_4111_8111_111111111111",
-        baseUrl: "https://planet.turingguild.com",
-      },
-    ],
-    ["modules.json", createRegistrationPayload().starterModules],
-    ["blueprints.json", { "command-module": createRegistrationPayload().blueprints[0] }],
-  ] as const) {
-    writeFileSync(path.join(habitatDirectory, fileName), `${JSON.stringify(contents, null, 2)}\n`);
-  }
+  const database = createRegistrationDatabase(habitatDirectory);
+  database
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`,
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
+  writeFileSync(
+    path.join(habitatDirectory, "modules.json"),
+    `${JSON.stringify(createRegistrationPayload().starterModules, null, 2)}\n`,
+  );
+  writeFileSync(
+    path.join(habitatDirectory, "blueprints.json"),
+    `${JSON.stringify({ "command-module": createRegistrationPayload().blueprints[0] }, null, 2)}\n`,
+  );
 
   const requests: string[] = [];
   const fetchMock = createFetchMock(async (url, init) => {
@@ -2382,6 +2365,7 @@ test("unregister removes registration, modules, and blueprints files", async () 
     "DELETE https://planet.turingguild.com/habitats/habitat_11111111_1111_4111_8111_111111111111",
   ]);
   expect(result.displayName).toBe("Starlight Forge");
+  expect(existsSync(path.join(habitatDirectory, "habitat.sqlite"))).toBe(false);
   expect(existsSync(path.join(habitatDirectory, "registration.json"))).toBe(false);
   expect(existsSync(path.join(habitatDirectory, "modules.json"))).toBe(false);
   expect(existsSync(path.join(habitatDirectory, "blueprints.json"))).toBe(false);

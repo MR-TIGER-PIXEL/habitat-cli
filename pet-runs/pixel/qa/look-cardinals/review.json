@@ -1,0 +1,61 @@
+{
+  "ok": true,
+  "strip": "/Users/amychang/Desktop/labs/habitat-cli/pet-runs/pixel/decoded/look-cardinals.png",
+  "directions": [
+    "000",
+    "090",
+    "180",
+    "270"
+  ],
+  "errors": [],
+  "anchors": [
+    {
+      "direction": "000",
+      "source_box": [
+        0,
+        0,
+        543,
+        724
+      ],
+      "used_pixels": 99786,
+      "edge_pixels": 0,
+      "output": "/Users/amychang/Desktop/labs/habitat-cli/pet-runs/pixel/qa/look-cardinals/anchors/000.png"
+    },
+    {
+      "direction": "090",
+      "source_box": [
+        543,
+        0,
+        1086,
+        724
+      ],
+      "used_pixels": 94365,
+      "edge_pixels": 0,
+      "output": "/Users/amychang/Desktop/labs/habitat-cli/pet-runs/pixel/qa/look-cardinals/anchors/090.png"
+    },
+    {
+      "direction": "180",
+      "source_box": [
+        1086,
+        0,
+        1629,
+        724
+      ],
+      "used_pixels": 97470,
+      "edge_pixels": 0,
+      "output": "/Users/amychang/Desktop/labs/habitat-cli/pet-runs/pixel/qa/look-cardinals/anchors/180.png"
+    },
+    {
+      "direction": "270",
+      "source_box": [
+        1629,
+        0,
+        2172,
+        724
+      ],
+      "used_pixels": 86044,
+      "edge_pixels": 0,
+      "output": "/Users/amychang/Desktop/labs/habitat-cli/pet-runs/pixel/qa/look-cardinals/anchors/270.png"
+    }
+  ]
+}

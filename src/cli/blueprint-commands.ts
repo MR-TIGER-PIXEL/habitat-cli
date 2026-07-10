@@ -1,6 +1,8 @@
 import { Command } from "commander";
-import { getOfficialBlueprint, listOfficialBlueprints, resolveConfig } from "../kepler";
 import { printBlueprintDetails, printBlueprintList } from "./formatters";
+import { createBackendApiClient } from "../api/backend-api";
+import { resolveBackendApiBaseUrl } from "../api/config";
+import type { StoredBlueprint } from "../kepler";
 
 export function createBlueprintCommand(): Command {
   const blueprintCommand = new Command("blueprint");
@@ -11,8 +13,8 @@ export function createBlueprintCommand(): Command {
     .command("list")
     .description("List official Kepler blueprint catalog entries.")
     .action(async () => {
-      const config = resolveConfig(process.cwd());
-      printBlueprintList(await listOfficialBlueprints(config));
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      printBlueprintList(await api.listOfficialBlueprints());
     });
 
   blueprintCommand
@@ -20,8 +22,8 @@ export function createBlueprintCommand(): Command {
     .description("Show one official Kepler blueprint catalog entry.")
     .argument("<blueprint-id>", "Official blueprint id")
     .action(async (blueprintId: string) => {
-      const config = resolveConfig(process.cwd());
-      printBlueprintDetails(await getOfficialBlueprint(config, blueprintId));
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      printBlueprintDetails((await api.getOfficialBlueprint(blueprintId)).blueprint as StoredBlueprint);
     });
 
   return blueprintCommand;

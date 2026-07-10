@@ -1,6 +1,7 @@
 import { Command } from "commander";
-import { getSolarIrradiance, resolveConfig } from "../kepler";
 import { printSolarStatus } from "./formatters";
+import { createBackendApiClient } from "../api/backend-api";
+import { resolveBackendApiBaseUrl } from "../api/config";
 
 export function createSolarCommand(): Command {
   const solarCommand = new Command("solar");
@@ -11,8 +12,8 @@ export function createSolarCommand(): Command {
     .command("status")
     .description("Show the current Kepler solar irradiance and condition.")
     .action(async () => {
-      const config = resolveConfig(process.cwd());
-      printSolarStatus(await getSolarIrradiance(config));
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      printSolarStatus(await api.getSolarIrradiance());
     });
 
   return solarCommand;

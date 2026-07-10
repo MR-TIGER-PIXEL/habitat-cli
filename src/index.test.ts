@@ -61,7 +61,13 @@ function runCli(cwd: string, ...args: string[]) {
 
 function runCliWithEnv(cwd: string, env: Record<string, string>, ...args: string[]) {
   return Bun.spawnSync({
-    cmd: ["bun", path.join(process.cwd(), "habitat"), ...args],
+    cmd: [
+      "bun",
+      "--preload",
+      path.join(process.cwd(), "src/test-cli-fetch-mock.ts"),
+      path.join(process.cwd(), "habitat"),
+      ...args,
+    ],
     cwd,
     stdout: "pipe",
     stderr: "pipe",
@@ -69,6 +75,7 @@ function runCliWithEnv(cwd: string, env: Record<string, string>, ...args: string
       ...process.env,
       KEPLER_PLANET_TOKEN: "test-token",
       KEPLER_BASE_URL: "https://planet.turingguild.com",
+      HABITAT_API_BASE_URL: "http://localhost:8787",
       ...env,
     },
   });
@@ -94,6 +101,7 @@ function runCliWithMockedFetch(
       ...process.env,
       KEPLER_PLANET_TOKEN: "test-token",
       KEPLER_BASE_URL: "https://planet.turingguild.com",
+      HABITAT_API_BASE_URL: "http://localhost:8787",
       HABITAT_TEST_FETCH_FIXTURES: JSON.stringify(fixtures),
     },
   });

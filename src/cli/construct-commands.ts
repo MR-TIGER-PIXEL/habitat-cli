@@ -1,6 +1,7 @@
 import { Command } from "commander";
-import { planConstruction, resolveConfig, startConstruction } from "../kepler";
 import { printConstructionPlan, printConstructionStarted } from "./formatters";
+import { createBackendApiClient } from "../api/backend-api";
+import { resolveBackendApiBaseUrl } from "../api/config";
 
 export function createConstructCommand(): Command {
   const constructCommand = new Command("construct");
@@ -10,14 +11,14 @@ export function createConstructCommand(): Command {
     .argument("<blueprint-id>", "Local blueprint id")
     .option("--dry-run", "Report construction readiness without changing local state")
     .action(async (blueprintId: string, options: { dryRun?: boolean }) => {
-      const config = resolveConfig(process.cwd());
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
 
       if (options.dryRun) {
-        printConstructionPlan(planConstruction(config, blueprintId));
+        printConstructionPlan(await api.planConstruction(blueprintId));
         return;
       }
 
-      printConstructionStarted(await startConstruction(config, blueprintId));
+      printConstructionStarted(await api.startConstruction(blueprintId));
     });
 
   return constructCommand;

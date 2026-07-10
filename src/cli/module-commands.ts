@@ -1,19 +1,13 @@
 import { Argument, Command } from "commander";
 import {
-  createModule,
-  deleteModule,
-  getModulePowerStatus,
-  listModules,
   MODULE_RUNTIME_STATUSES,
   parseJsonArray,
   parseJsonObject,
-  resolveConfig,
-  setModuleStatus,
-  showModule,
-  updateModule,
   type ModuleRuntimeStatus,
 } from "../kepler";
 import { printModuleDetails, printModuleList, printModuleStatus } from "./formatters";
+import { createBackendApiClient } from "../api/backend-api";
+import { resolveBackendApiBaseUrl } from "../api/config";
 
 export function createModuleCommand(): Command {
   const moduleCommand = new Command("module");
@@ -30,7 +24,7 @@ export function createModuleCommand(): Command {
     .option("--runtime-attributes <json>", "JSON object of runtime attributes")
     .option("--capabilities <json>", "JSON array of capability strings")
     .action(
-      (options: {
+      async (options: {
         id: string;
         blueprintId: string;
         name: string;
@@ -38,8 +32,8 @@ export function createModuleCommand(): Command {
         runtimeAttributes?: string;
         capabilities?: string;
       }) => {
-        const config = resolveConfig(process.cwd());
-        const module = createModule(config, {
+        const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+        const module = await api.createModule({
           id: options.id,
           blueprintId: options.blueprintId,
           displayName: options.name,
@@ -64,17 +58,17 @@ export function createModuleCommand(): Command {
   moduleCommand
     .command("list")
     .description("List local habitat modules.")
-    .action(() => {
-      const config = resolveConfig(process.cwd());
-      printModuleList(listModules(config));
+    .action(async () => {
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      printModuleList(await api.listModules());
     });
 
   moduleCommand
     .command("status")
     .description("Show local module runtime states and their current power draw.")
-    .action(() => {
-      const config = resolveConfig(process.cwd());
-      printModuleStatus(getModulePowerStatus(config));
+    .action(async () => {
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      printModuleStatus(await api.getModulePowerStatus());
     });
 
   moduleCommand
@@ -84,9 +78,9 @@ export function createModuleCommand(): Command {
     .addArgument(
       new Argument("<status>", "New module runtime status").choices([...MODULE_RUNTIME_STATUSES]),
     )
-    .action((moduleReference: string, status: ModuleRuntimeStatus) => {
-      const config = resolveConfig(process.cwd());
-      const result = setModuleStatus(config, moduleReference, status);
+    .action(async (moduleReference: string, status: ModuleRuntimeStatus) => {
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      const result = await api.setModuleStatus(moduleReference, status);
 
       console.log(`Updated module "${moduleReference}".`);
       console.log(`status: ${result.module.runtimeAttributes.status}`);
@@ -97,10 +91,10 @@ export function createModuleCommand(): Command {
     .command("show")
     .description("Show one local habitat module.")
     .argument("<id>", "Module id or short alias")
-    .action((moduleId: string) => {
-      const config = resolveConfig(process.cwd());
-      const result = showModule(config, moduleId);
-      printModuleDetails(result.module, listModules(config), result.blueprint);
+    .action(async (moduleId: string) => {
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      const result = await api.getModule(moduleId);
+      printModuleDetails(result.module, result.modules, result.blueprint);
     });
 
   moduleCommand
@@ -112,7 +106,7 @@ export function createModuleCommand(): Command {
     .option("--runtime-attributes <json>", "Replacement JSON object of runtime attributes")
     .option("--capabilities <json>", "Replacement JSON array of capability strings")
     .action(
-      (
+      async (
         moduleId: string,
         options: {
           name?: string;
@@ -121,8 +115,8 @@ export function createModuleCommand(): Command {
           capabilities?: string;
         },
       ) => {
-        const config = resolveConfig(process.cwd());
-        const module = updateModule(config, moduleId, {
+        const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+        const module = await api.updateModule(moduleId, {
           displayName: options.name,
           connectedTo:
             options.connectedTo !== undefined
@@ -146,9 +140,9 @@ export function createModuleCommand(): Command {
     .command("delete")
     .description("Delete one local habitat module.")
     .argument("<id>", "Module id or short alias")
-    .action((moduleId: string) => {
-      const config = resolveConfig(process.cwd());
-      const module = deleteModule(config, moduleId);
+    .action(async (moduleId: string) => {
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      const module = await api.deleteModule(moduleId);
 
       console.log(`Deleted module "${module.id}".`);
     });

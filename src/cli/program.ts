@@ -1,6 +1,6 @@
 import { Command } from "commander";
 import packageJson from "../../package.json";
-import { CliError, getRegistrationStatus, getSolarIrradiance, readTickState, registerHabitat, resolveConfig, runPowerTicks, unregisterHabitat } from "../kepler";
+import { CliError } from "../kepler";
 import { createBlueprintCommand } from "./blueprint-commands";
 import { createConstructionCommand } from "./construction-commands";
 import { createConstructCommand } from "./construct-commands";
@@ -10,6 +10,8 @@ import { createModuleCommand } from "./module-commands";
 import { parseInteger } from "./parsers";
 import { createResourceCommand } from "./resource-commands";
 import { createSolarCommand } from "./solar-commands";
+import { createBackendApiClient } from "../api/backend-api";
+import { resolveBackendApiBaseUrl } from "../api/config";
 
 export function createProgram(): Command {
   const program = new Command();
@@ -40,19 +42,24 @@ Examples:
 
   program
     .command("register")
-    .description("Register this CLI workspace as a habitat in Kepler.")
+    .description("Register this CLI workspace through the backend.")
     .requiredOption("--name <name>", "Habitat display name")
     .action(async (options: { name: string }) => {
-      const config = resolveConfig(process.cwd());
-      printRegistrationSuccess(await registerHabitat(config, options.name));
+      const api = createBackendApiClient({
+        baseUrl: resolveBackendApiBaseUrl(process.cwd()),
+      });
+      printRegistrationSuccess(await api.register(options.name));
     });
 
   program
     .command("status")
-    .description("Show the locally saved registration, module count, and current remote habitat status.")
+    .description("Show the backend-saved registration, module count, and current habitat status.")
     .action(async () => {
-      const config = resolveConfig(process.cwd());
-      printRegistrationStatus(await getRegistrationStatus(config), readTickState(config.cwd).currentTick);
+      const api = createBackendApiClient({
+        baseUrl: resolveBackendApiBaseUrl(process.cwd()),
+      });
+      const result = await api.status();
+      printRegistrationStatus(result);
     });
 
   program
@@ -60,9 +67,10 @@ Examples:
     .description("Advance the local habitat simulation by a number of power-only ticks.")
     .argument("<count>", "Number of ticks to advance", parseInteger)
     .action(async (count: number) => {
-      const config = resolveConfig(process.cwd());
-      const solarIrradiance = await getSolarIrradiance(config);
-      printTickResult(runPowerTicks(config, count, solarIrradiance), count);
+      const api = createBackendApiClient({
+        baseUrl: resolveBackendApiBaseUrl(process.cwd()),
+      });
+      printTickResult(await api.tick(count), count);
     });
 
   program.addCommand(createModuleCommand());
@@ -75,10 +83,12 @@ Examples:
 
   program
     .command("unregister")
-    .description("Delete the remote habitat registration and remove the saved local registration.")
+    .description("Delete the backend registration and remove the saved backend state.")
     .action(async () => {
-      const config = resolveConfig(process.cwd());
-      printUnregisterSuccess((await unregisterHabitat(config)).displayName);
+      const api = createBackendApiClient({
+        baseUrl: resolveBackendApiBaseUrl(process.cwd()),
+      });
+      printUnregisterSuccess((await api.unregister()).registration.displayName);
     });
 
   return program;

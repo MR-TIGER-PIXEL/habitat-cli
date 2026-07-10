@@ -8,12 +8,14 @@
   },
   "scripts": {
     "habitat": "./habitat",
+    "server": "bun run src/server.ts",
     "start": "./habitat",
     "test": "bun test",
     "typecheck": "bunx tsc --noEmit"
   },
   "dependencies": {
-    "commander": "^14.0.0"
+    "commander": "^14.0.0",
+    "hono": "^4.12.29"
   },
   "devDependencies": {
     "bun-types": "^1.3.14",

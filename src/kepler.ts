@@ -1,6 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { Database } from "bun:sqlite";
+import { createApiClient, ApiError } from "./api/client";
 
 export type FetchLike = typeof fetch;
 
@@ -233,10 +234,10 @@ export type CanceledConstruction = {
   fabricatorAlias: string;
 };
 
-const DEFAULT_BASE_URL = "https://planet.turingguild.com";
 const HABITAT_DIRECTORY = ".habitat";
 const HABITAT_DATABASE = "habitat.sqlite";
 const BLUEPRINTS_FILE = "blueprints.json";
+const DEFAULT_KEPLER_BASE_URL = "https://planet.turingguild.com";
 
 export class CliError extends Error {
   constructor(message: string) {
@@ -276,14 +277,16 @@ export function readEnvironmentFile(cwd: string): Record<string, string> {
 export function resolveConfig(cwd: string): CliConfig {
   const envFileValues = readEnvironmentFile(cwd);
   const baseUrl = normalizeBaseUrl(
-    process.env.KEPLER_BASE_URL ?? envFileValues.KEPLER_BASE_URL ?? DEFAULT_BASE_URL,
+    process.env.KEPLER_BASE_URL
+      ?? envFileValues.KEPLER_BASE_URL
+      ?? DEFAULT_KEPLER_BASE_URL,
   );
   const token = process.env.KEPLER_PLANET_TOKEN ?? envFileValues.KEPLER_PLANET_TOKEN;
 
   if (!token) {
     throw new CliError(
-      'Missing Kepler token. Set "KEPLER_PLANET_TOKEN" in your environment or .env file.',
-    );
+    'Missing Kepler token. Set "KEPLER_PLANET_TOKEN" in your environment or .env file.',
+  );
   }
 
   return {
@@ -333,7 +336,7 @@ export async function registerHabitat(
 
   writeStoredRegistration(config.cwd, registration);
   writeStoredModules(config.cwd, modules);
-  writeStoredBlueprints(config.cwd, blueprints);
+  writeBlueprintCatalog(config.cwd, blueprints);
 
   return { registration, response, modules, blueprints };
 }
@@ -402,7 +405,7 @@ export async function getOfficialBlueprint(
     return response.blueprint;
   } catch (error) {
     if (
-      error instanceof CliError
+      error instanceof ApiError
       && (error.message.includes("404") || error.message.includes("No blueprint with that id"))
     ) {
       throw new CliError(`Blueprint "${blueprintId}" was not found in the Kepler catalog.`);
@@ -1191,7 +1194,7 @@ function writeStoredInventory(cwd: string, inventory: ConstructionMaterialMap): 
   transaction(inventory);
 }
 
-function writeStoredBlueprints(cwd: string, blueprints: Record<string, StoredBlueprint>): void {
+export function writeBlueprintCatalog(cwd: string, blueprints: Record<string, StoredBlueprint>): void {
   ensureHabitatDirectory(cwd);
   writeFileSync(getBlueprintsPath(cwd), `${JSON.stringify(blueprints, null, 2)}\n`);
 }
@@ -1570,8 +1573,14 @@ async function requestJson<T>(
   endpoint: string,
   init: RequestInit,
 ): Promise<T> {
-  const response = await request(config, endpoint, init);
-  return (await response.json()) as T;
+  const client = createApiClient({
+    baseUrl: config.baseUrl,
+    fetchImpl: config.fetchImpl,
+    headers: {
+      authorization: `Bearer ${config.token}`,
+    },
+  });
+  return client.requestJson<T>(endpoint, init);
 }
 
 async function requestWithoutJson(
@@ -1579,45 +1588,12 @@ async function requestWithoutJson(
   endpoint: string,
   init: RequestInit,
 ): Promise<void> {
-  await request(config, endpoint, init);
-}
-
-async function request(
-  config: CliConfig,
-  endpoint: string,
-  init: RequestInit,
-): Promise<Response> {
-  const fetchImpl = config.fetchImpl ?? fetch;
-  const response = await fetchImpl(`${config.baseUrl}${endpoint}`, {
-    ...init,
+  const client = createApiClient({
+    baseUrl: config.baseUrl,
+    fetchImpl: config.fetchImpl,
     headers: {
       authorization: `Bearer ${config.token}`,
-      "content-type": "application/json",
-      ...init.headers,
     },
   });
-
-  if (!response.ok) {
-    throw await createResponseError(response);
-  }
-
-  return response;
-}
-
-async function createResponseError(response: Response): Promise<CliError> {
-  try {
-    const parsed = (await response.json()) as {
-      error?: {
-        message?: string;
-      };
-    };
-
-    if (parsed.error?.message) {
-      return new CliError(parsed.error.message);
-    }
-  } catch {
-    // Fall back to HTTP status text when no JSON error envelope is available.
-  }
-
-  return new CliError(`Kepler request failed with ${response.status} ${response.statusText}.`);
+  await client.requestWithoutJson(endpoint, init);
 }

@@ -1,6 +1,7 @@
 import { Command } from "commander";
-import { listOfficialResources, resolveConfig } from "../kepler";
 import { printResourceList } from "./formatters";
+import { createBackendApiClient } from "../api/backend-api";
+import { resolveBackendApiBaseUrl } from "../api/config";
 
 export function createResourceCommand(): Command {
   const resourceCommand = new Command("resource");
@@ -11,8 +12,8 @@ export function createResourceCommand(): Command {
     .command("list")
     .description("List official Kepler resource catalog entries.")
     .action(async () => {
-      const config = resolveConfig(process.cwd());
-      printResourceList(await listOfficialResources(config));
+      const api = createBackendApiClient({ baseUrl: resolveBackendApiBaseUrl(process.cwd()) });
+      printResourceList(await api.listOfficialResources());
     });
 
   return resourceCommand;

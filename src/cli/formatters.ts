@@ -61,15 +61,14 @@ export function printRegistrationSuccess(result: {
     displayName: string;
     habitatId: string;
     habitatUuid: string;
+    moduleCount: number;
   };
-  modules: Array<unknown>;
 }): void {
   console.log(`Registered habitat "${result.registration.displayName}".`);
   console.log(`habitatId: ${result.registration.habitatId}`);
   console.log(`habitatUuid: ${result.registration.habitatUuid}`);
-  console.log(`moduleCount: ${result.modules.length}`);
-  console.log("saved: .habitat/habitat.sqlite");
-  console.log("saved: .habitat/blueprints.json");
+  console.log(`moduleCount: ${result.registration.moduleCount}`);
+  console.log("saved: backend SQLite state");
 }
 
 export function printRegistrationStatus(result: {
@@ -77,7 +76,7 @@ export function printRegistrationStatus(result: {
     displayName: string;
     habitatId: string;
     habitatUuid: string;
-    baseUrl: string;
+    moduleCount: number;
   };
   habitat: {
     habitatSlug: string;
@@ -86,13 +85,13 @@ export function printRegistrationStatus(result: {
     lastSeenAt: string | null;
   };
   moduleCount: number;
-}, currentTick: number): void {
+  currentTick: number;
+}): void {
   console.log(`displayName: ${result.registration.displayName}`);
   console.log(`habitatId: ${result.registration.habitatId}`);
   console.log(`habitatUuid: ${result.registration.habitatUuid}`);
-  console.log(`baseUrl: ${result.registration.baseUrl}`);
   console.log(`moduleCount: ${result.moduleCount}`);
-  console.log(`currentTick: ${currentTick}`);
+  console.log(`currentTick: ${result.currentTick}`);
   console.log(`habitatSlug: ${result.habitat.habitatSlug}`);
   console.log(`status: ${result.habitat.status}`);
   console.log(`catalogVersion: ${result.habitat.catalogVersion}`);

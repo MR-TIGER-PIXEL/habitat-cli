@@ -103,26 +103,48 @@ export function readRegistration(cwd: string): BackendRegistration | null {
 export function writeRegistration(cwd: string, registration: BackendRegistration): void {
   ensureBackendDirectory(cwd);
   const database = openDatabase(cwd);
-  database
-    .query(
-      `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, api_token, module_count)
-       VALUES (1, ?, ?, ?, ?, ?)
-       ON CONFLICT(id) DO UPDATE SET
-         habitat_uuid = excluded.habitat_uuid,
-         habitat_id = excluded.habitat_id,
-         display_name = excluded.display_name,
-         api_token = excluded.api_token,
-         module_count = excluded.module_count`,
-    )
-    .run(
-      registration.habitatUuid,
-      registration.habitatId,
-      registration.displayName,
-      registration.apiToken,
-      registration.moduleCount,
-    );
-
-  setCurrentTick(cwd, 0);
+  if (registrationTableHasBaseUrl(database)) {
+    const existingBaseUrl = readLegacyBaseUrl(database);
+    database
+      .query(
+        `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, base_url, api_token, module_count)
+         VALUES (1, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           habitat_uuid = excluded.habitat_uuid,
+           habitat_id = excluded.habitat_id,
+           display_name = excluded.display_name,
+           base_url = excluded.base_url,
+           api_token = excluded.api_token,
+           module_count = excluded.module_count`,
+      )
+      .run(
+        registration.habitatUuid,
+        registration.habitatId,
+        registration.displayName,
+        existingBaseUrl,
+        registration.apiToken,
+        registration.moduleCount,
+      );
+  } else {
+    database
+      .query(
+        `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, api_token, module_count)
+         VALUES (1, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           habitat_uuid = excluded.habitat_uuid,
+           habitat_id = excluded.habitat_id,
+           display_name = excluded.display_name,
+           api_token = excluded.api_token,
+           module_count = excluded.module_count`,
+      )
+      .run(
+        registration.habitatUuid,
+        registration.habitatId,
+        registration.displayName,
+        registration.apiToken,
+        registration.moduleCount,
+      );
+  }
 }
 
 export function deleteRegistration(cwd: string): void {
@@ -192,4 +214,16 @@ export function writeInventory(cwd: string, inventory: Record<string, number>): 
     }
   });
   transaction(inventory);
+}
+
+function registrationTableHasBaseUrl(database: Database): boolean {
+  const columns = database.query<{ name: string }, []>("PRAGMA table_info(registration)").all();
+  return columns.some((column) => column.name === "base_url");
+}
+
+function readLegacyBaseUrl(database: Database): string {
+  const row = database.query<{ baseUrl: string }, []>(
+    "SELECT base_url AS baseUrl FROM registration WHERE id = 1",
+  ).get();
+  return row?.baseUrl ?? "";
 }

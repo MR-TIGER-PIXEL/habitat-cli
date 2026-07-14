@@ -76,6 +76,48 @@ export type BackendConfig = {
   fetchImpl?: typeof fetch;
 };
 
+export type BackendWorldScanProbability = {
+  resourceType: string | null;
+  probabilityPct: number;
+};
+
+export type BackendWorldScanQuantityEstimate = {
+  resourceType: string;
+  unit: string;
+  estimatedKg: number;
+  minimumKg: number;
+  maximumKg: number;
+  exact: boolean;
+};
+
+export type BackendWorldScanInput = {
+  x: number;
+  y: number;
+  sensorStrength: number;
+  radiusTiles: number;
+};
+
+export type BackendWorldScanResponse = {
+  scan: {
+    modelVersion: string;
+    origin: {
+      x: number;
+      y: number;
+    };
+    sensorStrength: number;
+    radiusTiles: number;
+    tiles: Array<{
+      x: number;
+      y: number;
+      terrain: string;
+      distanceTiles: number;
+      probabilities: BackendWorldScanProbability[];
+      topCandidate: BackendWorldScanProbability;
+      quantityEstimate: BackendWorldScanQuantityEstimate | null;
+    }>;
+  };
+};
+
 export function createBackendApiClient(config: BackendConfig) {
   const client = createApiClient({
     baseUrl: config.baseUrl,
@@ -127,6 +169,16 @@ export function createBackendApiClient(config: BackendConfig) {
 
     async getSolarIrradiance(): Promise<BackendSolarIrradiance> {
       return client.requestJson("/solar/irradiance", { method: "GET" });
+    },
+
+    async scanWorld(input: BackendWorldScanInput): Promise<BackendWorldScanResponse> {
+      const query = new URLSearchParams({
+        x: String(input.x),
+        y: String(input.y),
+        sensorStrength: String(input.sensorStrength),
+        radiusTiles: String(input.radiusTiles),
+      });
+      return client.requestJson(`/scan?${query.toString()}`, { method: "GET" });
     },
 
     async listModules(): Promise<LocalHabitatModule[]> {

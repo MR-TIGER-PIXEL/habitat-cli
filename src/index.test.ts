@@ -260,6 +260,78 @@ function createSolarIrradiancePayload() {
   };
 }
 
+function createScanPayload(radiusTiles = 0) {
+  const baseTile = {
+    x: 3,
+    y: -2,
+    terrain: "flat",
+    distanceTiles: 0,
+    probabilities: [
+      { resourceType: null, probabilityPct: 30.25 },
+      { resourceType: "ferrite", probabilityPct: 45.5 },
+      { resourceType: "ice-regolith", probabilityPct: 24.25 },
+    ],
+    topCandidate: {
+      resourceType: "ferrite",
+      probabilityPct: 45.5,
+    },
+    quantityEstimate: {
+      resourceType: "ferrite",
+      unit: "kg",
+      estimatedKg: 177,
+      minimumKg: 100,
+      maximumKg: 250,
+      exact: false,
+    },
+  };
+
+  const tiles = radiusTiles === 0
+    ? [baseTile]
+    : [
+      {
+        ...baseTile,
+        x: 2,
+        y: -3,
+        distanceTiles: 1.414,
+      },
+      {
+        ...baseTile,
+        x: 3,
+        y: -3,
+        distanceTiles: 1,
+        topCandidate: {
+          resourceType: null,
+          probabilityPct: 67.98,
+        },
+        quantityEstimate: null,
+      },
+      {
+        ...baseTile,
+        x: 3,
+        y: -2,
+        distanceTiles: 0,
+        quantityEstimate: {
+          resourceType: "ferrite",
+          unit: "kg",
+          estimatedKg: 180,
+          minimumKg: 180,
+          maximumKg: 180,
+          exact: true,
+        },
+      },
+    ];
+
+  return {
+    scan: {
+      modelVersion: "resource-probability-v2",
+      origin: { x: 3, y: -2 },
+      sensorStrength: 60,
+      radiusTiles,
+      tiles,
+    },
+  };
+}
+
 function createRegistrationDatabase(habitatDirectory: string): Database {
   const database = new Database(path.join(habitatDirectory, "habitat.sqlite"));
   database.exec(`
@@ -272,6 +344,30 @@ function createRegistrationDatabase(habitatDirectory: string): Database {
     );
   `);
   return database;
+}
+
+function seedRegistration(
+  habitatDirectory: string,
+  input: {
+    displayName?: string;
+    habitatUuid?: string;
+    habitatId?: string;
+    baseUrl?: string;
+  } = {},
+): void {
+  const database = createRegistrationDatabase(habitatDirectory);
+  database.query("DELETE FROM registration").run();
+  database
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`,
+    )
+    .run(
+      input.displayName ?? "Artemis Ridge",
+      input.habitatUuid ?? "a1408aa2-de20-4218-be5a-102aa55a12ce",
+      input.habitatId ?? "habitat_a1408aa2_de20_4218_be5a_102aa55a12ce",
+      input.baseUrl ?? "https://planet.turingguild.com",
+    );
 }
 
 function createLocalStateDatabase(habitatDirectory: string): Database {
@@ -2201,6 +2297,190 @@ test("resource list prints official resource types and explains the catalog boun
     "blueprint requirements: resources or modules needed to build something later",
   );
   expect(existsSync(path.join(cwd, ".habitat"))).toBe(false);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan with default radius 0 prints a detailed single-tile report", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory);
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/scan?habitatId=habitat_a1408aa2_de20_4218_be5a_102aa55a12ce&x=3&y=-2&sensorStrength=60&radiusTiles=0": {
+        status: 200,
+        body: createScanPayload(0),
+      },
+    },
+    "scan",
+    "--x",
+    "3",
+    "--y",
+    "-2",
+    "--strength",
+    "60",
+  );
+
+  expect(result.exitCode).toBe(0);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("position: (3, -2)");
+  expect(stdout).toContain("sensorStrength: 60");
+  expect(stdout).toContain("terrain: flat");
+  expect(stdout).toContain("resource probabilities:");
+  expect(stdout).toContain("none: 30.25%");
+  expect(stdout).toContain("ferrite: 45.5%");
+  expect(stdout).toContain("ice-regolith: 24.25%");
+  expect(stdout).toContain("topCandidate: ferrite");
+  expect(stdout).toContain("confidence: 45.5%");
+  expect(stdout).toContain("quantityEstimate: 177 kg");
+  expect(stdout).toContain("range: 100-250 kg");
+  expect(stdout).toContain("exact: no");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan with radius 1 prints one summary row per tile and omits quantity when the top candidate is none", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory);
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/scan?habitatId=habitat_a1408aa2_de20_4218_be5a_102aa55a12ce&x=3&y=-2&sensorStrength=60&radiusTiles=1": {
+        status: 200,
+        body: createScanPayload(1),
+      },
+    },
+    "scan",
+    "--x",
+    "3",
+    "--y",
+    "-2",
+    "--strength",
+    "60",
+    "--radius",
+    "1",
+  );
+
+  expect(result.exitCode).toBe(0);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("Coordinates  Distance  Terrain  Top Candidate  Confidence  Estimated Quantity");
+  expect(stdout).toContain("(2, -3)      1.414     flat     ferrite        45.5%       177 kg");
+  expect(stdout).toContain("(3, -3)      1         flat     none           67.98%");
+  expect(stdout).not.toContain("(3, -3)      1         flat     none           67.98%       0 kg");
+  expect(stdout).toContain("(3, -2)      0         flat     ferrite        45.5%       180 kg");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan --json prints the complete response unchanged", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory);
+  const payload = createScanPayload(1);
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/scan?habitatId=habitat_a1408aa2_de20_4218_be5a_102aa55a12ce&x=3&y=-2&sensorStrength=60&radiusTiles=1": {
+        status: 200,
+        body: payload,
+      },
+    },
+    "scan",
+    "--x",
+    "3",
+    "--y",
+    "-2",
+    "--strength",
+    "60",
+    "--radius",
+    "1",
+    "--json",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toBe(`${JSON.stringify(payload, null, 2)}\n`);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan rejects invalid strength 101", () => {
+  const cwd = createWorkspace();
+  const result = runCli(cwd, "scan", "--x", "3", "--y", "-2", "--strength", "101");
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain('Invalid strength "101". Use an integer from 0 through 100.');
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan rejects invalid radius 6", () => {
+  const cwd = createWorkspace();
+  const result = runCli(cwd, "scan", "--x", "3", "--y", "-2", "--strength", "60", "--radius", "6");
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain('Invalid radius "6". Use an integer from 0 through 5.');
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan rejects non-integer x or y", () => {
+  const cwd = createWorkspace();
+  const badX = runCli(cwd, "scan", "--x", "3.5", "--y", "-2", "--strength", "60");
+  const badY = runCli(cwd, "scan", "--x", "3", "--y", "-2.2", "--strength", "60");
+
+  expect(badX.exitCode).toBe(1);
+  expect(badX.stderr.toString()).toContain('Invalid x "3.5". Use an integer.');
+  expect(badY.exitCode).toBe(1);
+  expect(badY.stderr.toString()).toContain('Invalid y "-2.2". Use an integer.');
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan prints exact quantity estimates clearly", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory);
+  const payload = createScanPayload(0);
+  payload.scan.tiles[0].quantityEstimate = {
+    resourceType: "ferrite",
+    unit: "kg",
+    estimatedKg: 180,
+    minimumKg: 180,
+    maximumKg: 180,
+    exact: true,
+  };
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "GET https://planet.turingguild.com/world/scan?habitatId=habitat_a1408aa2_de20_4218_be5a_102aa55a12ce&x=3&y=-2&sensorStrength=60&radiusTiles=0": {
+        status: 200,
+        body: payload,
+      },
+    },
+    "scan",
+    "--x",
+    "3",
+    "--y",
+    "-2",
+    "--strength",
+    "60",
+  );
+
+  expect(result.exitCode).toBe(0);
+  const stdout = result.stdout.toString();
+  expect(stdout).toContain("quantityEstimate: 180 kg");
+  expect(stdout).toContain("range: 180-180 kg");
+  expect(stdout).toContain("exact: yes");
 
   rmSync(cwd, { recursive: true, force: true });
 });

@@ -1,4 +1,6 @@
-import { createApiClient } from "../api/client";
+import { copyFileSync, existsSync, mkdirSync } from "node:fs";
+import path from "node:path";
+import { ApiError, createApiClient } from "../api/client";
 import {
   deleteRegistration,
   readInventory,
@@ -63,10 +65,27 @@ type KeplerSolarResponse = {
   condition: string;
 };
 
+type WorldScanInput = {
+  x: number;
+  y: number;
+  sensorStrength: number;
+  radiusTiles: number;
+};
+
 type KeplerEnvironment = {
   baseUrl: string;
   token: string;
 };
+
+class HabitatServiceClientError extends Error {
+  constructor(
+    message: string,
+    public readonly status: number,
+  ) {
+    super(message);
+    this.name = "HabitatServiceClientError";
+  }
+}
 
 export async function getRegistration(cwd: string): Promise<BackendRegistration | null> {
   return readRegistration(cwd);
@@ -79,8 +98,14 @@ export async function registerHabitat(
   registration: BackendRegistration | null;
   response: KeplerRegistrationResponse;
 }> {
-  if (readRegistration(cwd)) {
-    throw new Error("Habitat is already registered.");
+  const existingRegistration = readRegistration(cwd);
+  if (existingRegistration) {
+    const status = await readExistingKeplerRegistration(existingRegistration);
+    if (status === "active") {
+      throw new Error("Habitat is already registered.");
+    }
+
+    return restoreKeplerRegistration(cwd, existingRegistration);
   }
 
   const kepler = createKeplerClient();
@@ -385,6 +410,46 @@ export async function getSolarIrradiance(): Promise<KeplerSolarResponse> {
   });
 }
 
+export async function scanWorld(
+  cwd: string,
+  input: WorldScanInput,
+): Promise<unknown> {
+  const registration = readRegistration(cwd);
+  if (!registration) {
+    throw new HabitatServiceClientError("No habitat registration found.", 404);
+  }
+
+  validateWorldScanInteger(input.x, "x");
+  validateWorldScanInteger(input.y, "y");
+  validateWorldScanIntegerInRange(
+    input.sensorStrength,
+    "sensorStrength",
+    0,
+    100,
+    'Invalid sensorStrength "%s". Use an integer from 0 through 100.',
+  );
+  validateWorldScanIntegerInRange(
+    input.radiusTiles,
+    "radiusTiles",
+    0,
+    5,
+    'Invalid radiusTiles "%s". Use an integer from 0 through 5.',
+  );
+
+  const query = new URLSearchParams({
+    habitatId: registration.habitatId,
+    x: String(input.x),
+    y: String(input.y),
+    sensorStrength: String(input.sensorStrength),
+    radiusTiles: String(input.radiusTiles),
+  });
+
+  const kepler = createKeplerClient();
+  return kepler.requestJson(`/world/scan?${query.toString()}`, {
+    method: "GET",
+  });
+}
+
 function createKeplerClient() {
   const env = readKeplerEnvironment();
   return createApiClient({
@@ -392,17 +457,65 @@ function createKeplerClient() {
     headers: {
       authorization: `Bearer ${env.token}`,
     },
-    fetchImpl: Object.assign(async (input: RequestInfo | URL, init?: RequestInit | BunFetchRequestInit) => {
-      const url = input instanceof Request ? input.url : String(input);
-      const method = init?.method ?? (input instanceof Request ? input.method : "GET");
-      const parsed = new URL(url);
-      const response = await fetch(input, init);
-      console.log(`[kepler] ${method} ${parsed.pathname} -> ${response.status}`);
-      return response;
-    }, {
-      preconnect: fetch.preconnect.bind(fetch),
-    }) as typeof fetch,
   });
+}
+
+async function readExistingKeplerRegistration(
+  registration: BackendRegistration,
+): Promise<"active" | "missing"> {
+  const kepler = createKeplerClient();
+
+  try {
+    await kepler.requestJson<KeplerStatusResponse>(
+      `/habitats/${registration.habitatId}/registration`,
+      { method: "GET" },
+    );
+    return "active";
+  } catch (error) {
+    if (error instanceof ApiError && error.status === 404 && error.message === "Habitat is not registered.") {
+      return "missing";
+    }
+    throw error;
+  }
+}
+
+async function restoreKeplerRegistration(
+  cwd: string,
+  registration: BackendRegistration,
+): Promise<{
+  registration: BackendRegistration;
+  response: KeplerRegistrationResponse;
+}> {
+  const kepler = createKeplerClient();
+  const response = await kepler.requestJson<KeplerRegistrationResponse>("/habitats/register", {
+    method: "POST",
+    body: JSON.stringify({
+      displayName: registration.displayName,
+      habitatUuid: registration.habitatUuid,
+    }),
+  });
+
+  backupRegistrationDatabase(cwd);
+
+  const restoredRegistration: BackendRegistration = {
+    ...registration,
+    habitatId: response.habitatId,
+    moduleCount: readModules(cwd).length,
+  };
+
+  writeRegistration(cwd, restoredRegistration);
+  writeBlueprintCatalog(cwd, Object.fromEntries(
+    response.blueprints.map((blueprint) => [blueprint.blueprintId, blueprint]),
+  ));
+
+  return {
+    registration: restoredRegistration,
+    response,
+  };
+}
+
+export function isUpstreamApiError(error: unknown): error is ApiError {
+  return error instanceof ApiError;
 }
 
 function hydrateStarterModule(module: unknown): LocalHabitatModule {
@@ -433,6 +546,10 @@ function ensureRegistered(cwd: string): void {
   if (!readRegistration(cwd)) {
     throw new Error("No habitat registration found.");
   }
+}
+
+export function isHabitatServiceClientError(error: unknown): error is HabitatServiceClientError {
+  return error instanceof HabitatServiceClientError;
 }
 
 function syncModuleCount(cwd: string, moduleCount: number): void {
@@ -520,4 +637,46 @@ function readKeplerEnvironment(): KeplerEnvironment {
 
 function normalizeBaseUrl(value: string): string {
   return value.replace(/\/+$/, "");
+}
+
+function backupRegistrationDatabase(cwd: string): string {
+  const sourcePath = path.join(cwd, ".habitat", "habitat.sqlite");
+  if (!existsSync(sourcePath)) {
+    throw new Error(`Expected SQLite database at ${sourcePath}.`);
+  }
+
+  const backupDirectory = path.join(cwd, "backups");
+  mkdirSync(backupDirectory, { recursive: true });
+  const backupPath = path.join(cwd, "backups", `habitat-${createBackupTimestamp()}.sqlite`);
+  copyFileSync(sourcePath, backupPath);
+  return backupPath;
+}
+
+function createBackupTimestamp(): string {
+  const now = new Date();
+  const year = String(now.getFullYear());
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hours = String(now.getHours()).padStart(2, "0");
+  const minutes = String(now.getMinutes()).padStart(2, "0");
+  const seconds = String(now.getSeconds()).padStart(2, "0");
+  return `${year}${month}${day}-${hours}${minutes}${seconds}`;
+}
+
+function validateWorldScanInteger(value: number, field: "x" | "y"): void {
+  if (!Number.isInteger(value)) {
+    throw new HabitatServiceClientError(`Invalid ${field} "${value}". Use an integer.`, 400);
+  }
+}
+
+function validateWorldScanIntegerInRange(
+  value: number,
+  field: "sensorStrength" | "radiusTiles",
+  minimum: number,
+  maximum: number,
+  template: string,
+): void {
+  if (!Number.isInteger(value) || value < minimum || value > maximum) {
+    throw new HabitatServiceClientError(template.replace("%s", String(value)), 400);
+  }
 }

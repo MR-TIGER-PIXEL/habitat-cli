@@ -9,6 +9,7 @@ import { createInventoryCommand } from "./inventory-commands";
 import { createModuleCommand } from "./module-commands";
 import { parseInteger } from "./parsers";
 import { createResourceCommand } from "./resource-commands";
+import { createScanCommand } from "./scan-commands";
 import { createSolarCommand } from "./solar-commands";
 import { createBackendApiClient } from "../api/backend-api";
 import { resolveBackendApiBaseUrl } from "../api/config";
@@ -31,6 +32,7 @@ Examples:
   habitat status
   habitat tick 60
   habitat solar status
+  habitat scan --x 3 --y -2 --strength 60
   habitat inventory add ferrite 90
   habitat inventory list
   habitat construct small-solar-array --dry-run
@@ -80,6 +82,7 @@ Examples:
   program.addCommand(createConstructionCommand());
   program.addCommand(createResourceCommand());
   program.addCommand(createSolarCommand());
+  program.addCommand(createScanCommand());
 
   program
     .command("unregister")

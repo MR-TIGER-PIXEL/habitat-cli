@@ -4,6 +4,8 @@ export class ApiError extends Error {
   constructor(
     message: string,
     public readonly status: number,
+    public readonly contentType?: string | null,
+    public readonly responseBody?: string,
   ) {
     super(message);
     this.name = "ApiError";
@@ -60,15 +62,18 @@ async function request(
 }
 
 async function createApiError(response: Response): Promise<ApiError> {
+  const contentType = response.headers.get("content-type");
+  const responseBody = await response.text();
+
   try {
-    const parsed = (await response.json()) as {
+    const parsed = JSON.parse(responseBody) as {
       error?: {
         message?: string;
       };
     };
 
     if (parsed.error?.message) {
-      return new ApiError(parsed.error.message, response.status);
+      return new ApiError(parsed.error.message, response.status, contentType, responseBody);
     }
   } catch {
     // Fall back to the generic HTTP status message below.
@@ -77,5 +82,7 @@ async function createApiError(response: Response): Promise<ApiError> {
   return new ApiError(
     `Request failed with ${response.status} ${response.statusText}.`,
     response.status,
+    contentType,
+    responseBody,
   );
 }

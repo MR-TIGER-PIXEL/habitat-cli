@@ -9,6 +9,7 @@ import {
   type StartedConstruction,
   type StoredBlueprint,
 } from "../kepler";
+import type { BackendWorldScanResponse } from "../api/backend-api";
 
 function printAlignedTable(headers: string[], rows: string[][]): void {
   const widths = headers.map((header, index) =>
@@ -452,8 +453,88 @@ export function printSolarStatus(result: SolarIrradiance): void {
   console.log("Local batteries and module state stay in your habitat CLI.");
 }
 
+export function printScanResult(
+  result: BackendWorldScanResponse,
+  options: { json: boolean },
+): void {
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  if (result.scan.radiusTiles === 0) {
+    printSingleTileScan(result);
+    return;
+  }
+
+  printScanSummary(result);
+}
+
 export function printUnregisterSuccess(displayName: string): void {
   console.log(`Unregistered habitat "${displayName}".`);
   console.log("removed: .habitat/habitat.sqlite");
   console.log("removed: .habitat/blueprints.json");
+}
+
+function printSingleTileScan(result: BackendWorldScanResponse): void {
+  const tile = result.scan.tiles[0];
+  if (!tile) {
+    console.log(`position: (${result.scan.origin.x}, ${result.scan.origin.y})`);
+    console.log(`sensorStrength: ${result.scan.sensorStrength}`);
+    console.log("No scan tiles returned.");
+    return;
+  }
+
+  console.log(`position: (${result.scan.origin.x}, ${result.scan.origin.y})`);
+  console.log(`sensorStrength: ${result.scan.sensorStrength}`);
+  console.log(`terrain: ${tile.terrain}`);
+  console.log("resource probabilities:");
+  for (const probability of tile.probabilities) {
+    console.log(`- ${probability.resourceType ?? "none"}: ${formatPercent(probability.probabilityPct)}`);
+  }
+  console.log(`topCandidate: ${tile.topCandidate.resourceType ?? "none"}`);
+  console.log(`confidence: ${formatPercent(tile.topCandidate.probabilityPct)}`);
+  if (tile.quantityEstimate) {
+    console.log(`quantityEstimate: ${tile.quantityEstimate.estimatedKg} ${tile.quantityEstimate.unit}`);
+    console.log(
+      `range: ${tile.quantityEstimate.minimumKg}-${tile.quantityEstimate.maximumKg} ${tile.quantityEstimate.unit}`,
+    );
+    console.log(`exact: ${tile.quantityEstimate.exact ? "yes" : "no"}`);
+  } else {
+    console.log("quantityEstimate: none");
+    console.log("range: none");
+    console.log("exact: no");
+  }
+}
+
+function printScanSummary(result: BackendWorldScanResponse): void {
+  printAlignedTable(
+    ["Coordinates", "Distance", "Terrain", "Top Candidate", "Confidence", "Estimated Quantity"],
+    result.scan.tiles.map((tile) => [
+      `(${tile.x}, ${tile.y})`,
+      formatNumber(tile.distanceTiles),
+      tile.terrain,
+      tile.topCandidate.resourceType ?? "none",
+      formatPercent(tile.topCandidate.probabilityPct),
+      getEstimatedQuantityLabel(tile),
+    ]),
+  );
+}
+
+function getEstimatedQuantityLabel(
+  tile: BackendWorldScanResponse["scan"]["tiles"][number],
+): string {
+  if (tile.topCandidate.resourceType === null || tile.quantityEstimate === null) {
+    return "";
+  }
+
+  return `${tile.quantityEstimate.estimatedKg} ${tile.quantityEstimate.unit}`;
+}
+
+function formatPercent(value: number): string {
+  return `${formatNumber(value)}%`;
+}
+
+function formatNumber(value: number): string {
+  return value.toFixed(3).replace(/\.?0+$/, "");
 }

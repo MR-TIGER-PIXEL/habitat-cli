@@ -1,3 +1,4 @@
+import { ApiError } from "../api/client";
 import { Hono } from "hono";
 import {
   addInventoryResource,
@@ -7,6 +8,7 @@ import {
   getSolarIrradiance,
   getRegistration,
   getStatus,
+  isHabitatServiceClientError,
   createModule,
   deleteModule,
   getModule,
@@ -19,6 +21,7 @@ import {
   registerHabitat,
   removeInventoryResource,
   planConstructionForHabitat,
+  scanWorld,
   setModuleStatus,
   startConstructionForHabitat,
   updateModule,
@@ -49,6 +52,12 @@ export type BackendAppOptions = {
   getOfficialBlueprint?: (blueprintId: string) => Promise<unknown>;
   listOfficialResources?: () => Promise<unknown>;
   getSolarIrradiance?: () => Promise<unknown>;
+  scanWorld?: (input: {
+    x: number;
+    y: number;
+    sensorStrength: number;
+    radiusTiles: number;
+  }) => Promise<unknown>;
   listModules?: () => Promise<unknown>;
   getModule?: (moduleReference: string) => Promise<unknown>;
   createModule?: (input: unknown) => Promise<unknown>;
@@ -78,6 +87,12 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   const readBlueprint = options.getOfficialBlueprint ?? ((blueprintId: string) => getOfficialBlueprint(blueprintId));
   const readResources = options.listOfficialResources ?? (() => listOfficialResources());
   const readSolar = options.getSolarIrradiance ?? (() => getSolarIrradiance());
+  const scanWorldHandler = options.scanWorld ?? ((input: {
+    x: number;
+    y: number;
+    sensorStrength: number;
+    radiusTiles: number;
+  }) => scanWorld(cwd, input));
   const readModules = options.listModules ?? (() => listModules(cwd));
   const readModule = options.getModule ?? ((moduleReference: string) => getModule(cwd, moduleReference));
   const createModuleHandler = options.createModule ?? ((input: unknown) => createModule(cwd, input as never));
@@ -96,7 +111,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
 
   app.get("/registration", async (c) => {
     const registration = await readRegistration();
-    logHabitatApi("GET", "/registration", registration ? "registered" : "not registered");
     return c.json({ registration: toPublicRegistration(registration) });
   });
 
@@ -108,7 +122,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
 
     try {
       const result = (await register(body.displayName)) as RegistrationResult;
-      logHabitatApi("POST", "/registration", "registered habitat");
       return c.json({ ...result, registration: toPublicRegistration(result.registration) }, 201);
     } catch (error) {
       return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 400);
@@ -118,7 +131,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   app.get("/status", async (c) => {
     try {
       const result = (await readStatus()) as StatusResult;
-      logHabitatApi("GET", "/status", "returned status");
       return c.json({ ...result, registration: toPublicRegistration(result.registration) });
     } catch (error) {
       return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
@@ -128,7 +140,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   app.delete("/registration", async (c) => {
     try {
       const registration = (await unregister()) as BackendRegistration;
-      logHabitatApi("DELETE", "/registration", "deleted registration");
       return c.json({ registration: toPublicRegistration(registration) });
     } catch (error) {
       return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
@@ -137,7 +148,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
 
   app.get("/catalog/blueprints", async (c) => {
     const result = await readBlueprints();
-    logHabitatApi("GET", "/catalog/blueprints", "proxied to Kepler");
     return c.json(result);
   });
 
@@ -145,7 +155,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
     const blueprintId = c.req.param("blueprintId");
     try {
       const result = await readBlueprint(blueprintId);
-      logHabitatApi("GET", "/catalog/blueprints/:blueprintId", "proxied to Kepler");
       return c.json(result);
     } catch (error) {
       if (error instanceof Error && error.message.includes("No blueprint with that id")) {
@@ -159,31 +168,78 @@ export function createApp(options: BackendAppOptions = {}): Hono {
 
   app.get("/catalog/resources", async (c) => {
     const result = await readResources();
-    logHabitatApi("GET", "/catalog/resources", "proxied to Kepler");
     return c.json(result);
   });
 
   app.get("/solar/irradiance", async (c) => {
     const result = await readSolar();
-    logHabitatApi("GET", "/solar/irradiance", "proxied to Kepler");
     return c.json(result);
+  });
+
+  app.get("/scan", async (c) => {
+    const xValue = c.req.query("x");
+    const yValue = c.req.query("y");
+    const sensorStrengthValue = c.req.query("sensorStrength");
+    const radiusTilesValue = c.req.query("radiusTiles");
+
+    const parsedX = parseRequiredIntegerQuery(xValue, "x");
+    if ("error" in parsedX) return c.json({ error: { message: parsedX.error } }, 400);
+
+    const parsedY = parseRequiredIntegerQuery(yValue, "y");
+    if ("error" in parsedY) return c.json({ error: { message: parsedY.error } }, 400);
+
+    const parsedSensorStrength = parseRequiredIntegerInRangeQuery(
+      sensorStrengthValue,
+      "sensorStrength",
+      0,
+      100,
+      'Invalid sensorStrength "%s". Use an integer from 0 through 100.',
+    );
+    if ("error" in parsedSensorStrength) return c.json({ error: { message: parsedSensorStrength.error } }, 400);
+
+    const parsedRadiusTiles = parseRequiredIntegerInRangeQuery(
+      radiusTilesValue,
+      "radiusTiles",
+      0,
+      5,
+      'Invalid radiusTiles "%s". Use an integer from 0 through 5.',
+    );
+    if ("error" in parsedRadiusTiles) return c.json({ error: { message: parsedRadiusTiles.error } }, 400);
+
+    try {
+      const result = await scanWorldHandler({
+        x: parsedX.value,
+        y: parsedY.value,
+        sensorStrength: parsedSensorStrength.value,
+        radiusTiles: parsedRadiusTiles.value,
+      });
+      return c.json(result);
+    } catch (error) {
+      if (error instanceof ApiError) {
+        return jsonErrorResponse(error.message, error.status);
+      }
+      if (isHabitatServiceClientError(error)) {
+        return jsonErrorResponse(error.message, error.status);
+      }
+      if (error instanceof Error && error.message === "No habitat registration found.") {
+        return c.json({ error: { message: error.message } }, 404);
+      }
+      throw error;
+    }
   });
 
   app.get("/modules", async (c) => {
     const modules = (await readModules()) as Array<unknown>;
-    logHabitatApi("GET", "/modules", `${modules.length} modules`);
     return c.json(modules);
   });
 
   app.get("/modules/status", async (c) => {
     const result = (await readModulePowerStatus()) as { rows: Array<unknown> };
-    logHabitatApi("GET", "/modules/status", `${result.rows.length} modules`);
     return c.json(result);
   });
 
   app.get("/modules/:moduleReference", async (c) => {
     const result = (await readModule(c.req.param("moduleReference"))) as unknown;
-    logHabitatApi("GET", "/modules/:moduleReference", "returned module details");
     return c.json(result);
   });
 
@@ -208,7 +264,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
           : undefined,
       capabilities: Array.isArray(body.capabilities) ? body.capabilities : undefined,
     })) as { id: string };
-    logHabitatApi("POST", "/modules", `created module ${result.id}`);
     return c.json(result, 201);
   });
 
@@ -223,26 +278,22 @@ export function createApp(options: BackendAppOptions = {}): Hono {
           : undefined,
       capabilities: Array.isArray(body.capabilities) ? body.capabilities : undefined,
     })) as unknown;
-    logHabitatApi("PUT", "/modules/:moduleReference", "updated module");
     return c.json(result);
   });
 
   app.delete("/modules/:moduleReference", async (c) => {
     const result = (await deleteModuleHandler(c.req.param("moduleReference"))) as { id: string };
-    logHabitatApi("DELETE", "/modules/:moduleReference", `deleted module ${result.id}`);
     return c.json(result);
   });
 
   app.put("/modules/:moduleReference/status", async (c) => {
     const body = (await c.req.json().catch(() => ({}))) as { status?: unknown };
     const result = (await setModuleStatusHandler(c.req.param("moduleReference"), body.status)) as { currentPowerDrawKw?: number };
-    logHabitatApi("PUT", "/modules/:moduleReference/status", "updated module status");
     return c.json(result);
   });
 
   app.get("/inventory", async (c) => {
     const inventory = (await readInventory()) as Array<unknown>;
-    logHabitatApi("GET", "/inventory", `${inventory.length} inventory entries`);
     return c.json(inventory);
   });
 
@@ -252,7 +303,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
       return c.json({ error: { message: "Missing inventory fields." } }, 400);
     }
     const result = (await addInventoryHandler(body.resourceType, body.quantity)) as { quantity: number; resourceType: string };
-    logHabitatApi("POST", "/inventory", `added ${result.quantity} of ${result.resourceType}`);
     return c.json(result, 201);
   });
 
@@ -262,7 +312,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
       return c.json({ error: { message: "Missing inventory fields." } }, 400);
     }
     const result = (await removeInventoryHandler(body.resourceType, body.quantity)) as { quantity: number; resourceType: string };
-    logHabitatApi("DELETE", "/inventory", `removed ${body.quantity} of ${result.resourceType}`);
     return c.json(result);
   });
 
@@ -272,7 +321,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
       return c.json({ error: { message: "Invalid tick count. Use a positive integer." } }, 400);
     }
     const result = await advanceTicksHandler(body.count);
-    logHabitatApi("POST", "/ticks", `advanced ${body.count} ticks`);
     return c.json(result);
   });
 
@@ -282,7 +330,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
       return c.json({ error: { message: "Missing blueprint id." } }, 400);
     }
     const result = await planConstructionHandler(body.blueprintId);
-    logHabitatApi("POST", "/construction/plan", "planned construction");
     return c.json(result);
   });
 
@@ -292,27 +339,20 @@ export function createApp(options: BackendAppOptions = {}): Hono {
       return c.json({ error: { message: "Missing blueprint id." } }, 400);
     }
     const result = await startConstructionHandler(body.blueprintId);
-    logHabitatApi("POST", "/construction", "started construction");
     return c.json(result, 201);
   });
 
   app.get("/construction", async (c) => {
     const result = await listConstructionJobsHandler();
-    logHabitatApi("GET", "/construction", `${(result as unknown[]).length} active jobs`);
     return c.json(result);
   });
 
   app.delete("/construction/:moduleReference", async (c) => {
     const result = await cancelConstructionHandler(c.req.param("moduleReference"));
-    logHabitatApi("DELETE", "/construction/:moduleReference", "canceled construction");
     return c.json(result);
   });
 
   return app;
-}
-
-function logHabitatApi(method: string, route: string, summary: string): void {
-  console.log(`[habitat-api] ${method} ${route} -> ${summary}`);
 }
 
 function toPublicRegistration(registration: BackendRegistration | null): PublicRegistration | null {
@@ -322,4 +362,48 @@ function toPublicRegistration(registration: BackendRegistration | null): PublicR
 
   const { apiToken: _apiToken, ...publicRegistration } = registration;
   return publicRegistration;
+}
+
+function parseRequiredIntegerQuery(
+  value: string | undefined,
+  field: "x" | "y",
+): { value: number; error?: undefined } | { value?: undefined; error: string } {
+  if (value === undefined || value.trim() === "") {
+    return { error: `Missing ${field}.` };
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) {
+    return { error: `Invalid ${field} "${value}". Use an integer.` };
+  }
+
+  return { value: parsed };
+}
+
+function parseRequiredIntegerInRangeQuery(
+  value: string | undefined,
+  field: "sensorStrength" | "radiusTiles",
+  minimum: number,
+  maximum: number,
+  template: string,
+): { value: number; error?: undefined } | { value?: undefined; error: string } {
+  if (value === undefined || value.trim() === "") {
+    return { error: `Missing ${field}.` };
+  }
+
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    return { error: template.replace("%s", value) };
+  }
+
+  return { value: parsed };
+}
+
+function jsonErrorResponse(message: string, status: number): Response {
+  return new Response(JSON.stringify({ error: { message } }), {
+    status,
+    headers: {
+      "content-type": "application/json",
+    },
+  });
 }

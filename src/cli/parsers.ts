@@ -17,3 +17,26 @@ export function parsePositiveInteger(value: string, label: string): number {
 
   return parsed;
 }
+
+export function parseStrictInteger(value: string, label: string): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || value.trim() === "") {
+    throw new CliError(`Invalid ${label} "${value}". Use an integer.`);
+  }
+
+  return parsed;
+}
+
+export function parseIntegerInRange(
+  value: string,
+  label: string,
+  minimum: number,
+  maximum: number,
+): number {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed < minimum || parsed > maximum) {
+    throw new CliError(`Invalid ${label} "${value}". Use an integer from ${minimum} through ${maximum}.`);
+  }
+
+  return parsed;
+}

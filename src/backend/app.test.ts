@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { createApp } from "./app";
+import { ApiError } from "../api/client";
 
 test("GET /registration returns null when no registration is stored", async () => {
   const app = createApp({ readRegistration: () => null });
@@ -268,6 +269,93 @@ test("catalog and solar routes proxy backend handlers", async () => {
   expect(await solar.json()).toEqual({
     irradianceWPerM2: 800,
     condition: "clear",
+  });
+});
+
+test("GET /scan validates query parameters, forwards to the backend handler, and returns the scan unchanged", async () => {
+  const app = createApp({
+    scanWorld: async (input: {
+      x: number;
+      y: number;
+      sensorStrength: number;
+      radiusTiles: number;
+    }) => ({
+      habitatId: "habitat-123",
+      echoed: input,
+      tiles: [{ x: 4, y: -2, resourceType: "water-ice" }],
+    }),
+  });
+
+  const response = await app.request(
+    "/scan?x=4&y=-2&sensorStrength=75&radiusTiles=3",
+  );
+
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    habitatId: "habitat-123",
+    echoed: {
+      x: 4,
+      y: -2,
+      sensorStrength: 75,
+      radiusTiles: 3,
+    },
+    tiles: [{ x: 4, y: -2, resourceType: "water-ice" }],
+  });
+});
+
+test("GET /scan returns clear client errors for invalid query parameters", async () => {
+  const app = createApp({
+    scanWorld: async () => {
+      throw new Error("scanWorld should not be called for invalid input");
+    },
+  });
+
+  const invalidX = await app.request("/scan?x=1.5&y=2&sensorStrength=75&radiusTiles=3");
+  expect(invalidX.status).toBe(400);
+  expect(await invalidX.json()).toEqual({
+    error: { message: 'Invalid x "1.5". Use an integer.' },
+  });
+
+  const invalidSensorStrength = await app.request("/scan?x=1&y=2&sensorStrength=101&radiusTiles=3");
+  expect(invalidSensorStrength.status).toBe(400);
+  expect(await invalidSensorStrength.json()).toEqual({
+    error: { message: 'Invalid sensorStrength "101". Use an integer from 0 through 100.' },
+  });
+
+  const invalidRadiusTiles = await app.request("/scan?x=1&y=2&sensorStrength=75&radiusTiles=6");
+  expect(invalidRadiusTiles.status).toBe(400);
+  expect(await invalidRadiusTiles.json()).toEqual({
+    error: { message: 'Invalid radiusTiles "6". Use an integer from 0 through 5.' },
+  });
+});
+
+test("GET /scan returns a clear error when no saved habitat registration exists", async () => {
+  const app = createApp({
+    scanWorld: async () => {
+      throw new Error("No habitat registration found.");
+    },
+  });
+
+  const response = await app.request("/scan?x=1&y=2&sensorStrength=75&radiusTiles=3");
+
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({
+    error: { message: "No habitat registration found." },
+  });
+});
+
+test("GET /scan preserves upstream error status and message", async () => {
+  const app = createApp({
+    scanWorld: async () => {
+      throw new ApiError("Habitat is not registered.", 404, "application/json", '{"error":{"code":"habitat_not_registered","message":"Habitat is not registered."}}');
+    },
+  });
+
+  const response = await app.request("/scan?x=1&y=2&sensorStrength=75&radiusTiles=3");
+
+  expect(response.status).toBe(404);
+  expect(await response.json()).toEqual({
+    error: { message: "Habitat is not registered." },
   });
 });
 

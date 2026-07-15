@@ -1,10 +1,14 @@
 import { Command } from "commander";
 import packageJson from "../../package.json";
 import { CliError } from "../kepler";
+import { createAlertCommand } from "./alert-commands";
 import { createBlueprintCommand } from "./blueprint-commands";
 import { createConstructionCommand } from "./construction-commands";
+import { createEvaCommand } from "./eva-commands";
 import { createConstructCommand } from "./construct-commands";
+import { createCollectCommand } from "./collect-commands";
 import { printRegistrationStatus, printRegistrationSuccess, printTickResult, printUnregisterSuccess } from "./formatters";
+import { createHumanCommand } from "./human-commands";
 import { createInventoryCommand } from "./inventory-commands";
 import { createModuleCommand } from "./module-commands";
 import { parseInteger } from "./parsers";
@@ -32,9 +36,13 @@ Examples:
   habitat status
   habitat tick 60
   habitat solar status
-  habitat scan --x 3 --y -2 --strength 60
+  habitat scan --strength 60
+  habitat collect 5
+  habitat alert list
   habitat inventory add ferrite 90
   habitat inventory list
+  habitat human list
+  habitat eva status
   habitat construct small-solar-array --dry-run
   habitat construction status
   habitat module list
@@ -76,6 +84,9 @@ Examples:
     });
 
   program.addCommand(createModuleCommand());
+  program.addCommand(createHumanCommand());
+  program.addCommand(createAlertCommand());
+  program.addCommand(createEvaCommand());
   program.addCommand(createInventoryCommand());
   program.addCommand(createBlueprintCommand());
   program.addCommand(createConstructCommand());
@@ -83,6 +94,7 @@ Examples:
   program.addCommand(createResourceCommand());
   program.addCommand(createSolarCommand());
   program.addCommand(createScanCommand());
+  program.addCommand(createCollectCommand());
 
   program
     .command("unregister")

@@ -4,24 +4,81 @@ import path from "node:path";
 import { expect, test } from "bun:test";
 import { createApp } from "./app";
 import { registerHabitat, scanWorld } from "./habitat-service";
-import { readInventory, readModules, readRegistration, writeInventory, writeModules, writeRegistration } from "./registration-store";
+import {
+  readExplorationState,
+  readHumans,
+  readInventory,
+  readModules,
+  readRegistration,
+  writeExplorationState,
+  writeInventory,
+  writeModules,
+  writeRegistration,
+} from "./registration-store";
 
 test("registration hydrates starter modules into backend SQLite and REST reads them", async () => {
   const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-backend-"));
   const originalFetch = globalThis.fetch;
-  const starterModules = Array.from({ length: 6 }, (_, index) => ({
-    id: `module-${index + 1}`,
-    blueprintId: `blueprint-${index + 1}`,
-    displayName: `Module ${index + 1}`,
-    connectedTo: [],
-    runtimeAttributes: { status: "active" },
-    capabilities: [],
-  }));
+  const starterModules = [
+    {
+      id: "module-command-1",
+      blueprintId: "command-module",
+      displayName: "Command Module",
+      connectedTo: [],
+      runtimeAttributes: { status: "active" },
+      capabilities: ["habitat-command"],
+    },
+    {
+      id: "module-suitport-1",
+      blueprintId: "basic-suitport",
+      displayName: "Basic Suitport",
+      connectedTo: ["module-command-1"],
+      runtimeAttributes: { status: "idle" },
+      capabilities: ["basic-suitport"],
+    },
+  ];
+  const starterHumans = [
+    {
+      id: "human-1",
+      displayName: "Crew Member 1",
+      locationModuleId: "module-command-1",
+    },
+    {
+      id: "human-2",
+      displayName: "Crew Member 2",
+      locationModuleId: "module-suitport-1",
+    },
+  ];
+  const contracts = {
+    alerts: {
+      schemaVersion: "1.0",
+      schema: {
+        type: "object",
+        required: ["kind", "severity", "status"],
+      },
+    },
+  };
 
   const mockedFetch = Object.assign(async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.endsWith("/habitats/register")) {
-      return new Response(JSON.stringify({ habitatId: "habitat-1", starterModules, blueprints: [] }), {
+      return new Response(JSON.stringify({
+        habitatId: "habitat-1",
+        streamUrl: "wss://planet.turingguild.com/planet/stream",
+        apiToken: "kepler-stream-token",
+        stream: {
+          protocolVersion: "1.0",
+          subscriptions: ["ticks"],
+          currentTick: 0,
+          tickIntervalMs: 1000,
+          ticksPerPulse: 1,
+          status: "paused",
+        },
+        contracts,
+        starterModules,
+        starterHumans,
+        blueprints: [],
+      }), {
         status: 201,
         headers: { "content-type": "application/json" },
       });
@@ -50,11 +107,15 @@ test("registration hydrates starter modules into backend SQLite and REST reads t
     const result = await registerHabitat(cwd, "Test Habitat");
     expect(result.registration).not.toBeNull();
     expect(result.registration?.moduleCount).toBe(starterModules.length);
+    expect(result.response.starterHumans).toEqual(starterHumans);
+    expect(result.response.contracts.alerts).toEqual(contracts.alerts);
+    expect(result.response.starterModules.some((module) => module.capabilities.includes("basic-suitport"))).toBe(true);
 
     const app = createApp({ cwd });
     const modulesResponse = await app.request("/modules");
     expect(modulesResponse.status).toBe(200);
     expect(await modulesResponse.json()).toHaveLength(starterModules.length);
+    expect(readHumans(cwd)).toEqual(starterHumans);
 
     const statusResponse = await app.request("/status");
     expect(statusResponse.status).toBe(200);
@@ -69,7 +130,7 @@ test("registration hydrates starter modules into backend SQLite and REST reads t
   }
 });
 
-test("scanWorld loads the saved habitatId and calls Kepler GET /world/scan with validated query parameters", async () => {
+test("scanWorld uses the deployed explorer's saved position when calling Kepler", async () => {
   const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-scan-"));
   const originalFetch = globalThis.fetch;
   const requests: string[] = [];
@@ -80,6 +141,13 @@ test("scanWorld loads the saved habitatId and calls Kepler GET /world/scan with 
     displayName: "Scan Habitat",
     apiToken: "token-scan",
     moduleCount: 1,
+  });
+  writeExplorationState(cwd, {
+    deployedHumanId: "human-1",
+    x: 10,
+    y: -3,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
   });
 
   const mockedFetch = Object.assign(async (input: RequestInfo | URL) => {
@@ -102,8 +170,6 @@ test("scanWorld loads the saved habitatId and calls Kepler GET /world/scan with 
 
   try {
     const result = await scanWorld(cwd, {
-      x: 10,
-      y: -3,
       sensorStrength: 80,
       radiusTiles: 4,
     });
@@ -121,6 +187,36 @@ test("scanWorld loads the saved habitatId and calls Kepler GET /world/scan with 
     else process.env.KEPLER_BASE_URL = previousBaseUrl;
     if (previousToken === undefined) delete process.env.KEPLER_PLANET_TOKEN;
     else process.env.KEPLER_PLANET_TOKEN = previousToken;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scanWorld rejects scans without a deployed human without changing EVA state", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-scan-no-explorer-"));
+  let fetchCalled = false;
+  const originalFetch = globalThis.fetch;
+
+  writeRegistration(cwd, {
+    habitatUuid: "uuid-scan",
+    habitatId: "habitat-scan-1",
+    displayName: "Scan Habitat",
+    apiToken: "token-scan",
+    moduleCount: 1,
+  });
+  const before = readExplorationState(cwd);
+  globalThis.fetch = Object.assign(async () => {
+    fetchCalled = true;
+    return new Response(JSON.stringify({}), { status: 200 });
+  }, { preconnect: () => {} }) as typeof fetch;
+
+  try {
+    await expect(scanWorld(cwd, { sensorStrength: 80, radiusTiles: 4 })).rejects.toThrow(
+      "No human is currently deployed.",
+    );
+    expect(fetchCalled).toBe(false);
+    expect(readExplorationState(cwd)).toEqual(before);
+  } finally {
+    globalThis.fetch = originalFetch;
     rmSync(cwd, { recursive: true, force: true });
   }
 });
@@ -177,6 +273,22 @@ test("registerHabitat repairs a stale local registration by re-registering the s
     if (url.endsWith("/habitats/register")) {
       return new Response(JSON.stringify({
         habitatId: "habitat-repaired-1",
+        streamUrl: "wss://planet.turingguild.com/planet/stream",
+        apiToken: "kepler-stream-token",
+        stream: {
+          protocolVersion: "1.0",
+          subscriptions: ["ticks"],
+          currentTick: 0,
+          tickIntervalMs: 1000,
+          ticksPerPulse: 1,
+          status: "paused",
+        },
+        contracts: {
+          alerts: {
+            schemaVersion: "1.0",
+            schema: { type: "object" },
+          },
+        },
         starterModules: [
           {
             id: "starter-module-1",
@@ -185,6 +297,18 @@ test("registerHabitat repairs a stale local registration by re-registering the s
             connectedTo: [],
             runtimeAttributes: { status: "active" },
             capabilities: [],
+          },
+        ],
+        starterHumans: [
+          {
+            id: "human-1",
+            displayName: "Crew Member 1",
+            locationModuleId: "module-command-1",
+          },
+          {
+            id: "human-2",
+            displayName: "Crew Member 2",
+            locationModuleId: "module-lab-1",
           },
         ],
         blueprints: [],
@@ -237,6 +361,18 @@ test("registerHabitat repairs a stale local registration by re-registering the s
       moduleCount: 2,
     });
     expect(readModules(cwd)).toHaveLength(2);
+    expect(readHumans(cwd)).toEqual([
+      {
+        id: "human-1",
+        displayName: "Crew Member 1",
+        locationModuleId: "module-command-1",
+      },
+      {
+        id: "human-2",
+        displayName: "Crew Member 2",
+        locationModuleId: "module-lab-1",
+      },
+    ]);
     expect(readInventory(cwd)).toEqual({ ferrite: 90, water: 12 });
     expect(result.response.habitatId).toBe("habitat-repaired-1");
   } finally {

@@ -71,7 +71,7 @@ export type LocalHabitatModule = {
   source: "registration" | "local";
 };
 
-type StarterModuleInstance = {
+export type StarterModuleInstance = {
   id: string;
   blueprintId: string;
   displayName: string;
@@ -80,9 +80,75 @@ type StarterModuleInstance = {
   capabilities: string[];
 };
 
-type HabitatRegistrationResponse = {
+export type StarterHuman = {
+  id: string;
+  displayName: string;
+  locationModuleId: string;
+};
+
+export const DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG = 20;
+
+export type ExplorationCarriedResources = Record<string, number>;
+
+export type ExplorationState = {
+  deployedHumanId: string | null;
+  x: number;
+  y: number;
+  carriedResources: ExplorationCarriedResources;
+  maxCarryingCapacityKg: number;
+};
+
+export type WorldSectorBounds = {
+  minX: number;
+  maxX: number;
+  minY: number;
+  maxY: number;
+};
+
+export type AlertContract = {
+  schemaVersion: string;
+  schema: Record<string, unknown>;
+};
+
+export type RegistrationContracts = {
+  alerts: AlertContract;
+};
+
+export type HabitatAlertStatus = "open" | "acknowledged" | "resolved";
+
+export type HabitatAlertSeverity = "info" | "warning" | "critical";
+
+export type HabitatAlert = {
+  id: string;
+  type: string;
+  contract: AlertContract;
+  severity: HabitatAlertSeverity;
+  status: HabitatAlertStatus;
+  source: string;
+  createdAt: string;
+  lastObservedAt: string;
+  occurrenceCount: number;
+  subjectHumanId?: string;
+  subjectModuleId?: string;
+};
+
+export type HabitatRegistrationStream = {
+  protocolVersion: string;
+  subscriptions: string[];
+  currentTick: number;
+  tickIntervalMs: number;
+  ticksPerPulse: number;
+  status: "paused" | "running";
+};
+
+export type HabitatRegistrationResponse = {
   habitatId: string;
+  streamUrl: string;
+  apiToken: string;
+  stream: HabitatRegistrationStream;
+  contracts: RegistrationContracts;
   starterModules: StarterModuleInstance[];
+  starterHumans: StarterHuman[];
   blueprints: StoredBlueprint[];
 };
 

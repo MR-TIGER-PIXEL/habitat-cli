@@ -4,6 +4,7 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import os from "node:os";
 import path from "node:path";
 import {
+  DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
   createModule,
   deleteModule,
   formatModuleListEntry,
@@ -26,6 +27,7 @@ import {
   type CliConfig,
   type FetchLike,
   type LocalHabitatModule,
+  type StarterHuman,
   type StoredBlueprint,
 } from "./kepler";
 
@@ -109,6 +111,22 @@ function runCliWithMockedFetch(
 
 function createRegistrationPayload(): {
   habitatId: string;
+  streamUrl: string;
+  apiToken: string;
+  stream: {
+    protocolVersion: string;
+    subscriptions: string[];
+    currentTick: number;
+    tickIntervalMs: number;
+    ticksPerPulse: number;
+    status: "paused" | "running";
+  };
+  contracts: {
+    alerts: {
+      schemaVersion: string;
+      schema: Record<string, unknown>;
+    };
+  };
   starterModules: Array<{
     id: string;
     blueprintId: string;
@@ -117,10 +135,34 @@ function createRegistrationPayload(): {
     runtimeAttributes: Record<string, unknown>;
     capabilities: string[];
   }>;
+  starterHumans: Array<{
+    id: string;
+    displayName: string;
+    locationModuleId: string;
+  }>;
   blueprints: StoredBlueprint[];
 } {
   return {
     habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    streamUrl: "wss://planet.turingguild.com/planet/stream",
+    apiToken: "kepler_live_token_placeholder",
+    stream: {
+      protocolVersion: "1.0",
+      subscriptions: ["ticks"],
+      currentTick: 0,
+      tickIntervalMs: 1000,
+      ticksPerPulse: 1,
+      status: "paused",
+    },
+    contracts: {
+      alerts: {
+        schemaVersion: "1.0",
+        schema: {
+          type: "object",
+          required: ["kind", "severity", "status"],
+        },
+      },
+    },
     starterModules: [
       {
         id: "module-command-1",
@@ -168,7 +210,19 @@ function createRegistrationPayload(): {
         displayName: "Basic Suitport",
         connectedTo: [],
         runtimeAttributes: { status: "idle", health: 100 },
-        capabilities: ["limited-eva"],
+        capabilities: ["basic-suitport"],
+      },
+    ],
+    starterHumans: [
+      {
+        id: "human-1",
+        displayName: "Crew Member 1",
+        locationModuleId: "module-command-1",
+      },
+      {
+        id: "human-2",
+        displayName: "Crew Member 2",
+        locationModuleId: "module-life-support-1",
       },
     ],
     blueprints: [
@@ -378,6 +432,26 @@ function createLocalStateDatabase(habitatDirectory: string): Database {
       module_json TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS humans (
+      id TEXT PRIMARY KEY,
+      human_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS alert_contract (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      contract_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS alerts (
+      id TEXT PRIMARY KEY,
+      alert_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS exploration_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      state_json TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS inventory (
       resource_type TEXT PRIMARY KEY,
       quantity INTEGER NOT NULL
@@ -400,6 +474,15 @@ function seedModules(habitatDirectory: string, modules: LocalHabitatModule[]): v
   }
 }
 
+function seedHumans(habitatDirectory: string, humans: StarterHuman[]): void {
+  const database = createLocalStateDatabase(habitatDirectory);
+  database.query("DELETE FROM humans").run();
+  const insert = database.query("INSERT INTO humans (id, human_json) VALUES (?, ?)");
+  for (const human of humans) {
+    insert.run(human.id, JSON.stringify(human));
+  }
+}
+
 function seedInventory(habitatDirectory: string, inventory: Record<string, number>): void {
   const database = createLocalStateDatabase(habitatDirectory);
   database.query("DELETE FROM inventory").run();
@@ -407,6 +490,48 @@ function seedInventory(habitatDirectory: string, inventory: Record<string, numbe
   for (const [resourceType, quantity] of Object.entries(inventory)) {
     insert.run(resourceType, quantity);
   }
+}
+
+function seedAlertContract(habitatDirectory: string): void {
+  const database = createLocalStateDatabase(habitatDirectory);
+  database
+    .query(
+      `INSERT INTO alert_contract (id, contract_json)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET contract_json = excluded.contract_json`,
+    )
+    .run(JSON.stringify({
+      schemaVersion: "1.0",
+      schema: {
+        type: "object",
+        required: ["kind", "severity", "status"],
+      },
+    }));
+}
+
+function seedDeployedExplorer(habitatDirectory: string, x = 3, y = -2): void {
+  const database = createLocalStateDatabase(habitatDirectory);
+  database
+    .query(
+      `INSERT INTO exploration_state (id, state_json)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json`,
+    )
+    .run(JSON.stringify({
+      deployedHumanId: "human-1",
+      x,
+      y,
+      carriedResources: {},
+      maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+    }));
+}
+
+function readExplorationStateJson(habitatDirectory: string): string {
+  const database = createLocalStateDatabase(habitatDirectory);
+  const row = database.query<{ state_json: string }, []>(
+    "SELECT state_json FROM exploration_state WHERE id = 1",
+  ).get();
+  return `${JSON.stringify(row ? JSON.parse(row.state_json) : null, null, 2)}\n`;
 }
 
 function readModulesJson(habitatDirectory: string): string {
@@ -425,6 +550,22 @@ function readInventoryJson(habitatDirectory: string): string {
     )
     .all();
   return `${JSON.stringify(Object.fromEntries(rows.map((row) => [row.resource_type, row.quantity])), null, 2)}\n`;
+}
+
+function readHumansJson(habitatDirectory: string): string {
+  const database = createLocalStateDatabase(habitatDirectory);
+  const rows = database
+    .query<{ human_json: string }, []>("SELECT human_json FROM humans ORDER BY rowid")
+    .all();
+  return `${JSON.stringify(rows.map((row) => JSON.parse(row.human_json)), null, 2)}\n`;
+}
+
+function readAlertsJson(habitatDirectory: string): string {
+  const database = createLocalStateDatabase(habitatDirectory);
+  const rows = database
+    .query<{ alert_json: string }, []>("SELECT alert_json FROM alerts ORDER BY rowid")
+    .all();
+  return `${JSON.stringify(rows.map((row) => JSON.parse(row.alert_json)), null, 2)}\n`;
 }
 
 function seedTickState(habitatDirectory: string, currentTick: number): void {
@@ -475,6 +616,9 @@ test("register stores registration, hydrated starter modules, and blueprint look
   );
   expect(result.modules.every((module) => module.source === "registration")).toBe(true);
   expect(Object.keys(result.blueprints)).toEqual(["command-module", "life-support"]);
+  expect(result.response.starterHumans).toEqual(payload.starterHumans);
+  expect(result.response.contracts.alerts).toEqual(payload.contracts.alerts);
+  expect(result.response.starterModules.some((module) => module.capabilities.includes("basic-suitport"))).toBe(true);
 
   expect(requests).toEqual([
     {
@@ -2142,6 +2286,417 @@ test("module list prints a clean table with alias, module name, blueprint id, an
   rmSync(cwd, { recursive: true, force: true });
 });
 
+test("human list prints a readable table and --json returns the stored humans unchanged", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+  }));
+  const starterHumans = createRegistrationPayload().starterHumans;
+
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
+  seedModules(habitatDirectory, starterModules);
+  seedHumans(habitatDirectory, starterHumans);
+
+  const shown = runCli(cwd, "human", "list");
+  const json = runCli(cwd, "human", "list", "--json");
+
+  expect(shown.exitCode).toBe(0);
+  const stdout = shown.stdout.toString();
+  expect(stdout).toContain("ID");
+  expect(stdout).toContain("Display Name");
+  expect(stdout).toContain("Current Module ID");
+  expect(stdout).toContain(starterHumans[0]?.id ?? "");
+  expect(stdout).toContain(starterHumans[0]?.displayName ?? "");
+  expect(stdout).toContain(starterHumans[0]?.locationModuleId ?? "");
+  expect(stdout).toContain(starterHumans[1]?.id ?? "");
+  expect(stdout).toContain(starterHumans[1]?.displayName ?? "");
+  expect(stdout).toContain(starterHumans[1]?.locationModuleId ?? "");
+
+  expect(json.exitCode).toBe(0);
+  expect(JSON.parse(json.stdout.toString())).toEqual(starterHumans);
+
+  const database = createLocalStateDatabase(habitatDirectory);
+  const count = database.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM humans").get();
+  expect(count?.count).toBe(starterHumans.length);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("human move updates the saved location through the local Habitat API", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+    runtimeAttributes: {
+      ...module.runtimeAttributes,
+      crewCapacity:
+        module.id === "module-command-1" ? 2
+        : module.id === "module-life-support-1" ? 2
+        : 0,
+    },
+  }));
+  const starterHumans = createRegistrationPayload().starterHumans;
+
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
+  seedModules(habitatDirectory, starterModules);
+  seedHumans(habitatDirectory, starterHumans);
+
+  const moved = runCli(cwd, "human", "move", "human-1", "module-life-support-1");
+  const listed = runCli(cwd, "human", "list", "--json");
+
+  expect(moved.exitCode).toBe(0);
+  expect(moved.stdout.toString()).toContain('Moved human "human-1" to "module-life-support-1".');
+  expect(JSON.parse(listed.stdout.toString())).toEqual([
+    {
+      id: "human-1",
+      displayName: "Crew Member 1",
+      locationModuleId: "module-life-support-1",
+    },
+    {
+      id: "human-2",
+      displayName: "Crew Member 2",
+      locationModuleId: starterHumans[1]?.locationModuleId,
+    },
+  ]);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("eva commands deploy, move, dock, and report persisted status through the local Habitat API", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+    runtimeAttributes: {
+      ...module.runtimeAttributes,
+      status: module.id === "module-suitport-1" ? "active" : module.runtimeAttributes.status,
+    },
+  }));
+  const starterHumans = [
+    {
+      id: "human-1",
+      displayName: "Crew Member 1",
+      locationModuleId: "module-suitport-1",
+    },
+    {
+      id: "human-2",
+      displayName: "Crew Member 2",
+      locationModuleId: "module-life-support-1",
+    },
+  ];
+
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
+  seedModules(habitatDirectory, starterModules);
+  seedHumans(habitatDirectory, starterHumans);
+  seedAlertContract(habitatDirectory);
+
+  const before = runCli(cwd, "eva", "status");
+  const deploy = runCli(cwd, "eva", "deploy", "human-1");
+  const move = runCli(cwd, "eva", "move", "1", "0");
+  const dockAtWrongPlace = runCli(cwd, "eva", "dock");
+  const moveBack = runCli(cwd, "eva", "move", "0", "0");
+  const dock = runCli(cwd, "eva", "dock");
+  const afterJson = runCli(cwd, "eva", "status", "--json");
+
+  expect(before.exitCode).toBe(0);
+  expect(before.stdout.toString()).toContain("deployedHumanId: (none)");
+  expect(before.stdout.toString()).toContain("position: (0, 0)");
+
+  expect(deploy.exitCode).toBe(0);
+  expect(deploy.stdout.toString()).toContain('Deployed human "human-1" to EVA at (0, 0).');
+
+  expect(move.exitCode).toBe(0);
+  expect(move.stdout.toString()).toContain("Moved deployed explorer to (1, 0).");
+
+  expect(dockAtWrongPlace.exitCode).toBe(1);
+  expect(dockAtWrongPlace.stderr.toString()).toContain("Docking is only allowed at (0, 0).");
+
+  expect(moveBack.exitCode).toBe(0);
+  expect(dock.exitCode).toBe(0);
+  expect(dock.stdout.toString()).toContain("Docked deployed explorer at (0, 0).");
+
+  expect(JSON.parse(afterJson.stdout.toString())).toEqual({
+    deployedHumanId: null,
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+  });
+  expect(readExplorationStateJson(habitatDirectory)).toBe(`${JSON.stringify({
+    deployedHumanId: null,
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+  }, null, 2)}\n`);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("eva dock transfers carried resources into local inventory exactly once and returns the human to the suitport", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  const starterModules = createRegistrationPayload().starterModules.map((module) => ({
+    ...module,
+    source: "registration" as const,
+    runtimeAttributes: {
+      ...module.runtimeAttributes,
+      status: module.id === "module-suitport-1" ? "active" : module.runtimeAttributes.status,
+    },
+  }));
+  const starterHumans = [
+    {
+      id: "human-1",
+      displayName: "Crew Member 1",
+      locationModuleId: "module-lab-1",
+    },
+    {
+      id: "human-2",
+      displayName: "Crew Member 2",
+      locationModuleId: "module-life-support-1",
+    },
+  ];
+
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
+  seedModules(habitatDirectory, starterModules);
+  seedHumans(habitatDirectory, starterHumans);
+  seedInventory(habitatDirectory, {
+    ferrite: 4,
+    ice: 1,
+  });
+  createLocalStateDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO exploration_state (id, state_json)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json`,
+    )
+    .run(JSON.stringify({
+      deployedHumanId: "human-1",
+      x: 0,
+      y: 0,
+      carriedResources: {
+        ferrite: 3,
+        ice: 2,
+        regolith: 5,
+      },
+      maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+    }));
+
+  const dock = runCli(cwd, "eva", "dock");
+  const dockAgain = runCli(cwd, "eva", "dock");
+  const status = runCli(cwd, "eva", "status", "--json");
+
+  expect(dock.exitCode).toBe(0);
+  expect(dock.stdout.toString()).toContain("Docked deployed explorer at (0, 0).");
+  expect(dockAgain.exitCode).toBe(1);
+  expect(dockAgain.stderr.toString()).toContain("No human is currently deployed.");
+  expect(JSON.parse(status.stdout.toString())).toEqual({
+    deployedHumanId: null,
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+  });
+  expect(readInventoryJson(habitatDirectory)).toBe(`${JSON.stringify({
+    ferrite: 7,
+    ice: 3,
+    regolith: 5,
+  }, null, 2)}\n`);
+  expect(readHumansJson(habitatDirectory)).toBe(`${JSON.stringify([
+    {
+      id: "human-1",
+      displayName: "Crew Member 1",
+      locationModuleId: "module-suitport-1",
+    },
+    {
+      id: "human-2",
+      displayName: "Crew Member 2",
+      locationModuleId: "module-life-support-1",
+    },
+  ], null, 2)}\n`);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("alert list and acknowledge route through the local Habitat API and update persisted alert status", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  createRegistrationDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
+       VALUES (1, ?, ?, ?, ?)`
+    )
+    .run(
+      "Starlight Forge",
+      "11111111-1111-4111-8111-111111111111",
+      "habitat_11111111_1111_4111_8111_111111111111",
+      "https://planet.turingguild.com",
+    );
+  createLocalStateDatabase(habitatDirectory)
+    .query(
+      `INSERT INTO alert_contract (id, contract_json)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET contract_json = excluded.contract_json`,
+    )
+    .run(JSON.stringify({
+      schemaVersion: "1.0",
+      schema: {
+        type: "object",
+        required: ["kind", "severity", "status"],
+      },
+    }));
+  createLocalStateDatabase(habitatDirectory)
+    .query("INSERT INTO alerts (id, alert_json) VALUES (?, ?)")
+    .run("alert:eva-deployed:human-1", JSON.stringify({
+      id: "alert:eva-deployed:human-1",
+      type: "eva.deployed-outside-habitat",
+      contract: {
+        schemaVersion: "1.0",
+        schema: {
+          type: "object",
+          required: ["kind", "severity", "status"],
+        },
+      },
+      severity: "warning",
+      status: "open",
+      source: "local.eva",
+      createdAt: "2026-07-15T10:00:00.000Z",
+      lastObservedAt: "2026-07-15T10:05:00.000Z",
+      occurrenceCount: 2,
+      subjectHumanId: "human-1",
+    }));
+
+  const listed = runCli(cwd, "alert", "list");
+  const acknowledged = runCli(cwd, "alert", "acknowledge", "alert:eva-deployed:human-1");
+  const listedJson = runCli(cwd, "alert", "list", "--json");
+
+  expect(listed.exitCode).toBe(0);
+  expect(listed.stdout.toString()).toContain("alert:eva-deployed:human-1");
+  expect(listed.stdout.toString()).toContain("eva.deployed-outside-habitat");
+  expect(listed.stdout.toString()).toContain("open");
+
+  expect(acknowledged.exitCode).toBe(0);
+  expect(acknowledged.stdout.toString()).toContain('Acknowledged alert "alert:eva-deployed:human-1".');
+
+  expect(JSON.parse(listedJson.stdout.toString())).toEqual([
+    expect.objectContaining({
+      id: "alert:eva-deployed:human-1",
+      type: "eva.deployed-outside-habitat",
+      contract: {
+        schemaVersion: "1.0",
+        schema: {
+          type: "object",
+          required: ["kind", "severity", "status"],
+        },
+      },
+      severity: "warning",
+      status: "acknowledged",
+      source: "local.eva",
+      createdAt: "2026-07-15T10:00:00.000Z",
+      occurrenceCount: 2,
+      subjectHumanId: "human-1",
+    }),
+  ]);
+  expect(readAlertsJson(habitatDirectory)).toContain('"status": "acknowledged"');
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("collect sends the deployed explorer's saved position through the local Habitat API and persists the result", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory);
+  seedDeployedExplorer(habitatDirectory, 1, 0);
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "POST https://planet.turingguild.com/world/collect": {
+        status: 200,
+        body: {
+          collection: {
+            x: 1,
+            y: 0,
+            resourceType: "ferrite",
+            unit: "kg",
+            collectedKg: 5,
+            remainingKg: 175,
+          },
+        },
+      },
+    },
+    "collect",
+    "5",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stdout.toString()).toContain("Collected 5 kg of ferrite.");
+  expect(readExplorationStateJson(habitatDirectory)).toBe(`${JSON.stringify({
+    deployedHumanId: "human-1",
+    x: 1,
+    y: 0,
+    carriedResources: { ferrite: 5 },
+    maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+  }, null, 2)}\n`);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
 test("CLI help shows the tick command", () => {
   const cwd = createWorkspace();
   const result = runCli(cwd, "--help");
@@ -2306,6 +2861,7 @@ test("scan with default radius 0 prints a detailed single-tile report", () => {
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
   seedRegistration(habitatDirectory);
+  seedDeployedExplorer(habitatDirectory);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -2316,10 +2872,6 @@ test("scan with default radius 0 prints a detailed single-tile report", () => {
       },
     },
     "scan",
-    "--x",
-    "3",
-    "--y",
-    "-2",
     "--strength",
     "60",
   );
@@ -2347,6 +2899,7 @@ test("scan with radius 1 prints one summary row per tile and omits quantity when
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
   seedRegistration(habitatDirectory);
+  seedDeployedExplorer(habitatDirectory);
 
   const result = runCliWithMockedFetch(
     cwd,
@@ -2357,10 +2910,6 @@ test("scan with radius 1 prints one summary row per tile and omits quantity when
       },
     },
     "scan",
-    "--x",
-    "3",
-    "--y",
-    "-2",
     "--strength",
     "60",
     "--radius",
@@ -2383,6 +2932,7 @@ test("scan --json prints the complete response unchanged", () => {
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
   seedRegistration(habitatDirectory);
+  seedDeployedExplorer(habitatDirectory);
   const payload = createScanPayload(1);
 
   const result = runCliWithMockedFetch(
@@ -2394,10 +2944,6 @@ test("scan --json prints the complete response unchanged", () => {
       },
     },
     "scan",
-    "--x",
-    "3",
-    "--y",
-    "-2",
     "--strength",
     "60",
     "--radius",
@@ -2413,33 +2959,33 @@ test("scan --json prints the complete response unchanged", () => {
 
 test("scan rejects invalid strength 101", () => {
   const cwd = createWorkspace();
-  const result = runCli(cwd, "scan", "--x", "3", "--y", "-2", "--strength", "101");
+  const result = runCli(cwd, "scan", "--strength", "101");
 
   expect(result.exitCode).toBe(1);
-  expect(result.stderr.toString()).toContain('Invalid strength "101". Use an integer from 0 through 100.');
+  expect(result.stderr.toString()).toContain('Invalid sensorStrength "101". Use an integer from 0 through 100.');
 
   rmSync(cwd, { recursive: true, force: true });
 });
 
 test("scan rejects invalid radius 6", () => {
   const cwd = createWorkspace();
-  const result = runCli(cwd, "scan", "--x", "3", "--y", "-2", "--strength", "60", "--radius", "6");
+  const result = runCli(cwd, "scan", "--strength", "60", "--radius", "6");
 
   expect(result.exitCode).toBe(1);
-  expect(result.stderr.toString()).toContain('Invalid radius "6". Use an integer from 0 through 5.');
+  expect(result.stderr.toString()).toContain('Invalid radiusTiles "6". Use an integer from 0 through 5.');
 
   rmSync(cwd, { recursive: true, force: true });
 });
 
-test("scan rejects non-integer x or y", () => {
+test("scan does not accept x or y options", () => {
   const cwd = createWorkspace();
-  const badX = runCli(cwd, "scan", "--x", "3.5", "--y", "-2", "--strength", "60");
-  const badY = runCli(cwd, "scan", "--x", "3", "--y", "-2.2", "--strength", "60");
+  const badX = runCli(cwd, "scan", "--strength", "60", "--x", "3");
+  const badY = runCli(cwd, "scan", "--strength", "60", "--y", "-2");
 
   expect(badX.exitCode).toBe(1);
-  expect(badX.stderr.toString()).toContain('Invalid x "3.5". Use an integer.');
+  expect(badX.stderr.toString()).toContain("unknown option '--x'");
   expect(badY.exitCode).toBe(1);
-  expect(badY.stderr.toString()).toContain('Invalid y "-2.2". Use an integer.');
+  expect(badY.stderr.toString()).toContain("unknown option '--y'");
 
   rmSync(cwd, { recursive: true, force: true });
 });
@@ -2449,6 +2995,7 @@ test("scan prints exact quantity estimates clearly", () => {
   const habitatDirectory = path.join(cwd, ".habitat");
   mkdirSync(habitatDirectory, { recursive: true });
   seedRegistration(habitatDirectory);
+  seedDeployedExplorer(habitatDirectory);
   const payload = createScanPayload(0);
   payload.scan.tiles[0].quantityEstimate = {
     resourceType: "ferrite",
@@ -2468,10 +3015,6 @@ test("scan prints exact quantity estimates clearly", () => {
       },
     },
     "scan",
-    "--x",
-    "3",
-    "--y",
-    "-2",
     "--strength",
     "60",
   );

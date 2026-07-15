@@ -53,6 +53,27 @@ function defaultFixture(url: string, method: string): Fixture {
     return { status: 200, body: { irradianceWPerM2: 800, condition: "clear" } };
   }
 
+  if (method === "GET" && url.includes("/world/sectors/current")) {
+    return {
+      status: 200,
+      body: {
+        sector: {
+          id: "kepler-442b-local-001",
+          displayName: "Kepler-442b Local Survey Grid",
+          origin: { x: 0, y: 0 },
+          bounds: {
+            minX: -25,
+            maxX: 24,
+            minY: -25,
+            maxY: 24,
+          },
+          tileSizeMeters: 100,
+          supportedTerrains: ["flat"],
+        },
+      },
+    };
+  }
+
   if (method === "GET" && url.includes("/habitats/") && url.endsWith("/registration")) {
     return {
       status: 200,

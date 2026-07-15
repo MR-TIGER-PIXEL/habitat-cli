@@ -1,7 +1,7 @@
 import type { AlertContract, HabitatAlert, HabitatAlertSeverity, HabitatAlertStatus } from "../kepler";
 import { readAlertContract, readAlerts, writeAlerts } from "./registration-store";
 
-type AlertObservation = {
+export type AlertObservation = {
   id: string;
   type: string;
   severity: HabitatAlertSeverity;
@@ -87,15 +87,101 @@ export function resolveCollectionFailureAlert(
   return resolveAlert(cwd, `alert:collection-failed:${input.humanId}`, input.now);
 }
 
-async function observeAlert(cwd: string, observation: AlertObservation): Promise<HabitatAlert | null> {
-  const contract = await ensureAlertContract(cwd);
+export function observeBatteryLowAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): Promise<HabitatAlert | null> {
+  return observeAlert(cwd, {
+    id: `alert:eva-battery-low:${input.humanId}`,
+    type: "eva.battery-low",
+    severity: "warning",
+    source: "local.eva",
+    subjectHumanId: input.humanId,
+    now: input.now,
+  });
+}
+
+export function resolveBatteryLowAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): HabitatAlert | null {
+  return resolveAlert(cwd, `alert:eva-battery-low:${input.humanId}`, input.now);
+}
+
+export function observeBatteryExhaustedAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): Promise<HabitatAlert | null> {
+  return observeAlert(cwd, {
+    id: `alert:eva-battery-exhausted:${input.humanId}`,
+    type: "eva.battery-exhausted",
+    severity: "critical",
+    source: "local.eva",
+    subjectHumanId: input.humanId,
+    now: input.now,
+  });
+}
+
+export function resolveBatteryExhaustedAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): HabitatAlert | null {
+  return resolveAlert(cwd, `alert:eva-battery-exhausted:${input.humanId}`, input.now);
+}
+
+export function observeOxygenLowAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): Promise<HabitatAlert | null> {
+  return observeAlert(cwd, {
+    id: `alert:eva-oxygen-low:${input.humanId}`,
+    type: "eva.oxygen-low",
+    severity: "warning",
+    source: "local.eva",
+    subjectHumanId: input.humanId,
+    now: input.now,
+  });
+}
+
+export function resolveOxygenLowAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): HabitatAlert | null {
+  return resolveAlert(cwd, `alert:eva-oxygen-low:${input.humanId}`, input.now);
+}
+
+export function observeOxygenExhaustedAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): Promise<HabitatAlert | null> {
+  return observeAlert(cwd, {
+    id: `alert:eva-oxygen-exhausted:${input.humanId}`,
+    type: "eva.oxygen-exhausted",
+    severity: "critical",
+    source: "local.eva",
+    subjectHumanId: input.humanId,
+    now: input.now,
+  });
+}
+
+export function resolveOxygenExhaustedAlert(
+  cwd: string,
+  input: { humanId: string; now?: string },
+): HabitatAlert | null {
+  return resolveAlert(cwd, `alert:eva-oxygen-exhausted:${input.humanId}`, input.now);
+}
+
+export function applyAlertObservation(
+  alerts: HabitatAlert[],
+  contract: AlertContract | null,
+  observation: AlertObservation,
+): HabitatAlert[] {
   if (!contract) {
-    return null;
+    return alerts;
   }
-  const alerts = readAlerts(cwd);
+
   const now = observation.now ?? new Date().toISOString();
   const existing = alerts.find((alert) => alert.id === observation.id);
-
   const nextAlert: HabitatAlert = existing
     ? {
       ...existing,
@@ -122,15 +208,19 @@ async function observeAlert(cwd: string, observation: AlertObservation): Promise
       subjectModuleId: observation.subjectModuleId,
     };
 
-  persistAlert(cwd, alerts, nextAlert);
-  return nextAlert;
+  const nextAlerts = alerts.filter((alert) => alert.id !== nextAlert.id);
+  nextAlerts.push(nextAlert);
+  return nextAlerts;
 }
 
-function resolveAlert(cwd: string, alertId: string, now = new Date().toISOString()): HabitatAlert | null {
-  const alerts = readAlerts(cwd);
+export function applyAlertResolution(
+  alerts: HabitatAlert[],
+  alertId: string,
+  now = new Date().toISOString(),
+): HabitatAlert[] {
   const existing = alerts.find((alert) => alert.id === alertId);
   if (!existing) {
-    return null;
+    return alerts;
   }
 
   const nextAlert: HabitatAlert = {
@@ -138,7 +228,31 @@ function resolveAlert(cwd: string, alertId: string, now = new Date().toISOString
     status: "resolved",
     lastObservedAt: now,
   };
-  persistAlert(cwd, alerts, nextAlert);
+  const nextAlerts = alerts.filter((alert) => alert.id !== nextAlert.id);
+  nextAlerts.push(nextAlert);
+  return nextAlerts;
+}
+
+async function observeAlert(cwd: string, observation: AlertObservation): Promise<HabitatAlert | null> {
+  const contract = await ensureAlertContract(cwd);
+  if (!contract) {
+    return null;
+  }
+  const alerts = readAlerts(cwd);
+  const nextAlerts = applyAlertObservation(alerts, contract, observation);
+  const nextAlert = nextAlerts.find((alert) => alert.id === observation.id) ?? null;
+  writeAlerts(cwd, nextAlerts);
+  return nextAlert;
+}
+
+function resolveAlert(cwd: string, alertId: string, now = new Date().toISOString()): HabitatAlert | null {
+  const alerts = readAlerts(cwd);
+  const nextAlerts = applyAlertResolution(alerts, alertId, now);
+  const nextAlert = nextAlerts.find((alert) => alert.id === alertId) ?? null;
+  if (!nextAlert) {
+    return null;
+  }
+  writeAlerts(cwd, nextAlerts);
   return nextAlert;
 }
 

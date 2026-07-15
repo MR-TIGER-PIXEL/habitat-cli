@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createApp } from "./app";
 import { ApiError } from "../api/client";
+import { HabitatServiceClientError } from "./habitat-service";
 import { readAlertContract, writeHumans, writeModules, writeRegistration } from "./registration-store";
 
 test("GET /registration returns null when no registration is stored", async () => {
@@ -480,6 +481,24 @@ test("GET /scan preserves upstream error status and message", async () => {
   expect(response.status).toBe(404);
   expect(await response.json()).toEqual({
     error: { message: "Habitat is not registered." },
+  });
+});
+
+test("GET /scan returns a non-500 client error for exhausted explorers", async () => {
+  const app = createApp({
+    scanWorld: async () => {
+      throw new HabitatServiceClientError(
+        "Explorer oxygen is exhausted. The explorer did not return in time.",
+        400,
+      );
+    },
+  });
+
+  const response = await app.request("/scan?sensorStrength=100&radiusTiles=0");
+
+  expect(response.status).toBe(400);
+  expect(await response.json()).toEqual({
+    error: { message: "Explorer oxygen is exhausted. The explorer did not return in time." },
   });
 });
 

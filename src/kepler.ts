@@ -87,6 +87,11 @@ export type StarterHuman = {
 };
 
 export const DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG = 20;
+export const DEFAULT_EVA_MAX_BATTERY_PERCENT = 100;
+export const DEFAULT_EVA_MAX_OXYGEN_UNITS = 80;
+export const DEFAULT_EVA_BATTERY_DRAIN_PER_TICK_PERCENT = 10;
+export const DEFAULT_EVA_OXYGEN_DRAIN_PER_TICK_UNITS = 10;
+export const DEFAULT_EVA_LOW_RESOURCE_THRESHOLD_PERCENT = 25;
 
 export type ExplorationCarriedResources = Record<string, number>;
 
@@ -96,6 +101,12 @@ export type ExplorationState = {
   y: number;
   carriedResources: ExplorationCarriedResources;
   maxCarryingCapacityKg: number;
+  batteryPercent: number | null;
+  maxBatteryPercent: number;
+  batteryDrainPerTickPercent: number;
+  oxygenUnits: number | null;
+  maxOxygenUnits: number;
+  oxygenDrainPerTickUnits: number;
 };
 
 export type WorldSectorBounds = {
@@ -222,6 +233,16 @@ export type SolarChargingSummary = {
   generatedKwh: number;
   chargedKwh: number;
   reason: string;
+};
+
+export type PowerTickResult = {
+  startTick: number;
+  endTick: number;
+  totalEnergyUsedKwh: number;
+  solarCharging: SolarChargingSummary;
+  batteries: TickBatterySummary[];
+  completedConstructions: CompletedConstruction[];
+  modules: LocalHabitatModule[];
 };
 
 export type ModulePowerStatusRow = {
@@ -595,27 +616,18 @@ export function setModuleStatus(
   };
 }
 
-export function runPowerTicks(
-  config: CliConfig,
+export function simulatePowerTicks(
+  modulesInput: LocalHabitatModule[],
+  startTick: number,
   count: number,
   solarIrradiance?: SolarIrradiance,
-): {
-  startTick: number;
-  endTick: number;
-  totalEnergyUsedKwh: number;
-  solarCharging: SolarChargingSummary;
-  batteries: TickBatterySummary[];
-  completedConstructions: CompletedConstruction[];
-} {
-  requireStoredRegistration(config.cwd);
-
+): PowerTickResult {
   if (!Number.isInteger(count) || count <= 0) {
     throw new CliError("Invalid tick count. Use a positive integer.");
   }
 
-  const modules = readStoredModules(config.cwd);
-  const state = readTickState(config.cwd);
-  const startTick = state.currentTick;
+  const modules = modulesInput.map((module) => structuredClone(module));
+  let currentTick = startTick;
   let totalEnergyUsedKwh = 0;
   let totalSolarGeneratedKwh = 0;
   let totalSolarChargedKwh = 0;
@@ -635,11 +647,8 @@ export function runPowerTicks(
     totalEnergyUsedKwh += tickEnergyUsedKwh;
     totalSolarGeneratedKwh += generatedKwhPerTick;
     totalSolarChargedKwh += chargedKwh;
-    state.currentTick += 1;
+    currentTick += 1;
   }
-
-  writeStoredModules(config.cwd, modules);
-  writeTickState(config.cwd, state);
 
   const batteries = modules
     .filter(isBatteryModule)
@@ -652,7 +661,7 @@ export function runPowerTicks(
 
   return {
     startTick,
-    endTick: state.currentTick,
+    endTick: currentTick,
     totalEnergyUsedKwh,
     solarCharging: {
       generatedKwh: totalSolarGeneratedKwh,
@@ -666,7 +675,24 @@ export function runPowerTicks(
     },
     batteries,
     completedConstructions,
+    modules,
   };
+}
+
+export function runPowerTicks(
+  config: CliConfig,
+  count: number,
+  solarIrradiance?: SolarIrradiance,
+): Omit<PowerTickResult, "modules"> {
+  requireStoredRegistration(config.cwd);
+  const modules = readStoredModules(config.cwd);
+  const state = readTickState(config.cwd);
+  const result = simulatePowerTicks(modules, state.currentTick, count, solarIrradiance);
+  writeStoredModules(config.cwd, result.modules);
+  writeTickState(config.cwd, { currentTick: result.endTick });
+
+  const { modules: _modules, ...summary } = result;
+  return summary;
 }
 
 export function formatModuleListEntry(

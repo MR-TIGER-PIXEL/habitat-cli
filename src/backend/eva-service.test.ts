@@ -81,6 +81,12 @@ test("getEvaStatus returns the default local exploration state when none has bee
       y: 0,
       carriedResources: {},
       maxCarryingCapacityKg: 20,
+      batteryPercent: null,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: null,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
   } finally {
     rmSync(cwd, { recursive: true, force: true });
@@ -99,6 +105,12 @@ test("deployHuman deploys a human from the active Basic Suitport at (0, 0)", asy
       y: 0,
       carriedResources: {},
       maxCarryingCapacityKg: 20,
+      batteryPercent: 100,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 80,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
     expect(readExplorationState(cwd).deployedHumanId).toBe("human-1");
     expect(readAlerts(cwd)).toEqual([
@@ -168,6 +180,12 @@ test("moveExplorer persists a successful adjacent move inside the current Kepler
       y: 0,
       carriedResources: {},
       maxCarryingCapacityKg: 20,
+      batteryPercent: 100,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 80,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
     expect(readExplorationState(cwd).x).toBe(1);
   } finally {
@@ -244,6 +262,12 @@ test("dockExplorer clears the deployed human only when the explorer is at (0, 0)
       y: 0,
       carriedResources: {},
       maxCarryingCapacityKg: 20,
+      batteryPercent: 100,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 80,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
 
     await expect(dockExplorer(cwd)).rejects.toThrow("Docking is only allowed at (0, 0).");
@@ -255,6 +279,12 @@ test("dockExplorer clears the deployed human only when the explorer is at (0, 0)
       y: 0,
       carriedResources: {},
       maxCarryingCapacityKg: 20,
+      batteryPercent: 100,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 80,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
 
     expect(await dockExplorer(cwd)).toEqual({
@@ -263,6 +293,12 @@ test("dockExplorer clears the deployed human only when the explorer is at (0, 0)
       y: 0,
       carriedResources: {},
       maxCarryingCapacityKg: 20,
+      batteryPercent: null,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: null,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
     expect(readAlerts(cwd)).toEqual([
       expect.objectContaining({
@@ -303,6 +339,12 @@ test("dockExplorer transfers carried resources into local inventory, returns the
         regolith: 5,
       },
       maxCarryingCapacityKg: 20,
+      batteryPercent: 10,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 10,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
 
     expect(await dockExplorer(cwd)).toEqual({
@@ -311,6 +353,12 @@ test("dockExplorer transfers carried resources into local inventory, returns the
       y: 0,
       carriedResources: {},
       maxCarryingCapacityKg: 20,
+      batteryPercent: null,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: null,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
     expect(readInventory(cwd)).toEqual({
       ferrite: 7,
@@ -356,6 +404,12 @@ test("dockExplorer rolls back the entire transaction when the deployed human rec
         regolith: 5,
       },
       maxCarryingCapacityKg: 20,
+      batteryPercent: 10,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 10,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
 
     const inventoryBefore = readInventory(cwd);
@@ -366,6 +420,35 @@ test("dockExplorer rolls back the entire transaction when the deployed human rec
     expect(readInventory(cwd)).toEqual(inventoryBefore);
     expect(readHumans(cwd)).toEqual(humansBefore);
     expect(readExplorationState(cwd)).toEqual(explorationBefore);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("moveExplorer rejects movement after suit resources are exhausted without changing saved state", async () => {
+  const cwd = createCwd();
+
+  try {
+    seedRegisteredEvaState(cwd);
+    writeExplorationState(cwd, {
+      deployedHumanId: "human-1",
+      x: 0,
+      y: 0,
+      carriedResources: {},
+      maxCarryingCapacityKg: 20,
+      batteryPercent: 0,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 20,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
+    });
+
+    const before = readExplorationState(cwd);
+    await expect(moveExplorer(cwd, { x: 1, y: 0 })).rejects.toThrow(
+      "Explorer battery is exhausted. The explorer did not return in time.",
+    );
+    expect(readExplorationState(cwd)).toEqual(before);
   } finally {
     rmSync(cwd, { recursive: true, force: true });
   }

@@ -134,6 +134,12 @@ test("carrying-capacity alerts open at maximum capacity and resolve after the ex
       y: 0,
       carriedResources: { ferrite: 20 },
       maxCarryingCapacityKg: 20,
+      batteryPercent: 100,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 80,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
     });
 
     await observeCarryingCapacityAlert(cwd, {

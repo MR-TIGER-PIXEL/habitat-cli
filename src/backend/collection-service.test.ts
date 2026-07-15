@@ -30,6 +30,12 @@ function seedRegisteredExplorer(cwd: string, carriedResources: Record<string, nu
     y: -2,
     carriedResources,
     maxCarryingCapacityKg: 20,
+    batteryPercent: 100,
+    maxBatteryPercent: 100,
+    batteryDrainPerTickPercent: 10,
+    oxygenUnits: 80,
+    maxOxygenUnits: 80,
+    oxygenDrainPerTickUnits: 10,
   });
 }
 
@@ -176,6 +182,26 @@ test("collectMaterial increments occurrence count for repeated rejected remote c
     globalThis.fetch = originalFetch;
     delete process.env.KEPLER_BASE_URL;
     delete process.env.KEPLER_PLANET_TOKEN;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("collectMaterial rejects exhausted explorers without changing carried resources", async () => {
+  const cwd = createCwd();
+
+  try {
+    seedRegisteredExplorer(cwd, { ferrite: 3 });
+    writeExplorationState(cwd, {
+      ...readExplorationState(cwd),
+      oxygenUnits: 0,
+    });
+
+    const before = readExplorationState(cwd);
+    await expect(collectMaterial(cwd, 1)).rejects.toThrow(
+      "Explorer oxygen is exhausted. The explorer did not return in time.",
+    );
+    expect(readExplorationState(cwd)).toEqual(before);
+  } finally {
     rmSync(cwd, { recursive: true, force: true });
   }
 });

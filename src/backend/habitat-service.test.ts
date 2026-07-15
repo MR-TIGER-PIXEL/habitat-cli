@@ -1,15 +1,19 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { Database } from "bun:sqlite";
 import { expect, test } from "bun:test";
 import { createApp } from "./app";
-import { registerHabitat, scanWorld } from "./habitat-service";
+import { advanceTicks, registerHabitat, scanWorld } from "./habitat-service";
 import {
+  readAlerts,
+  readCurrentTick,
   readExplorationState,
   readHumans,
   readInventory,
   readModules,
   readRegistration,
+  writeAlertContract,
   writeExplorationState,
   writeInventory,
   writeModules,
@@ -148,6 +152,12 @@ test("scanWorld uses the deployed explorer's saved position when calling Kepler"
     y: -3,
     carriedResources: {},
     maxCarryingCapacityKg: 20,
+    batteryPercent: 100,
+    maxBatteryPercent: 100,
+    batteryDrainPerTickPercent: 10,
+    oxygenUnits: 80,
+    maxOxygenUnits: 80,
+    oxygenDrainPerTickUnits: 10,
   });
 
   const mockedFetch = Object.assign(async (input: RequestInfo | URL) => {
@@ -217,6 +227,286 @@ test("scanWorld rejects scans without a deployed human without changing EVA stat
     expect(readExplorationState(cwd)).toEqual(before);
   } finally {
     globalThis.fetch = originalFetch;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scanWorld rejects scans after suit battery is exhausted without changing EVA state", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-scan-exhausted-"));
+
+  writeRegistration(cwd, {
+    habitatUuid: "uuid-scan",
+    habitatId: "habitat-scan-1",
+    displayName: "Scan Habitat",
+    apiToken: "token-scan",
+    moduleCount: 1,
+  });
+  writeExplorationState(cwd, {
+    deployedHumanId: "human-1",
+    x: 1,
+    y: 2,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+    batteryPercent: 0,
+    maxBatteryPercent: 100,
+    batteryDrainPerTickPercent: 10,
+    oxygenUnits: 60,
+    maxOxygenUnits: 80,
+    oxygenDrainPerTickUnits: 10,
+  });
+
+  try {
+    const before = readExplorationState(cwd);
+    await expect(scanWorld(cwd, { sensorStrength: 80, radiusTiles: 4 })).rejects.toThrow(
+      "Explorer battery is exhausted. The explorer did not return in time.",
+    );
+    expect(readExplorationState(cwd)).toEqual(before);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("scanWorld rejects scans after suit oxygen is exhausted with a client error and leaves EVA state unchanged", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-scan-oxygen-exhausted-"));
+
+  writeRegistration(cwd, {
+    habitatUuid: "uuid-scan",
+    habitatId: "habitat-scan-1",
+    displayName: "Scan Habitat",
+    apiToken: "token-scan",
+    moduleCount: 1,
+  });
+  writeExplorationState(cwd, {
+    deployedHumanId: "human-1",
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+    batteryPercent: 20,
+    maxBatteryPercent: 100,
+    batteryDrainPerTickPercent: 10,
+    oxygenUnits: 0,
+    maxOxygenUnits: 80,
+    oxygenDrainPerTickUnits: 10,
+  });
+
+  try {
+    const before = readExplorationState(cwd);
+    await expect(scanWorld(cwd, { sensorStrength: 100, radiusTiles: 0 })).rejects.toMatchObject({
+      name: "HabitatServiceClientError",
+      status: 400,
+      message: "Explorer oxygen is exhausted. The explorer did not return in time.",
+    });
+    expect(readExplorationState(cwd)).toEqual(before);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("advanceTicks drains suit resources, creates related alerts, and persists the exhausted state", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-tick-eva-drain-"));
+  const originalFetch = globalThis.fetch;
+
+  writeRegistration(cwd, {
+    habitatUuid: "uuid-tick",
+    habitatId: "habitat-tick-1",
+    displayName: "Tick Habitat",
+    apiToken: "token-tick",
+    moduleCount: 1,
+  });
+  writeAlertContract(cwd, {
+    schemaVersion: "1.0",
+    schema: {
+      type: "object",
+      required: ["kind", "severity", "status"],
+    },
+  });
+  writeModules(cwd, [
+    {
+      id: "module-suitport-1",
+      blueprintId: "basic-suitport",
+      displayName: "Basic Suitport",
+      connectedTo: [],
+      runtimeAttributes: { status: "active" },
+      capabilities: ["basic-suitport"],
+      source: "registration",
+    },
+  ]);
+  writeExplorationState(cwd, {
+    deployedHumanId: "human-1",
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+    batteryPercent: 30,
+    maxBatteryPercent: 100,
+    batteryDrainPerTickPercent: 10,
+    oxygenUnits: 20,
+    maxOxygenUnits: 80,
+    oxygenDrainPerTickUnits: 10,
+  });
+
+  globalThis.fetch = Object.assign(async () =>
+    new Response(JSON.stringify({ irradianceWPerM2: 0, condition: "night" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }), { preconnect: () => {} }) as typeof fetch;
+  process.env.KEPLER_BASE_URL = "https://kepler.test";
+  process.env.KEPLER_PLANET_TOKEN = "test-token";
+
+  try {
+    const result = await advanceTicks(cwd, 2);
+    expect(result.endTick).toBe(2);
+    expect(readCurrentTick(cwd)).toBe(2);
+    expect(readExplorationState(cwd)).toEqual({
+      deployedHumanId: "human-1",
+      x: 0,
+      y: 0,
+      carriedResources: {},
+      maxCarryingCapacityKg: 20,
+      batteryPercent: 10,
+      maxBatteryPercent: 100,
+      batteryDrainPerTickPercent: 10,
+      oxygenUnits: 0,
+      maxOxygenUnits: 80,
+      oxygenDrainPerTickUnits: 10,
+    });
+    expect(readAlerts(cwd)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: "alert:eva-battery-low:human-1", status: "open" }),
+      expect.objectContaining({ id: "alert:eva-oxygen-low:human-1", status: "open" }),
+      expect.objectContaining({ id: "alert:eva-oxygen-exhausted:human-1", status: "open" }),
+    ]));
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.KEPLER_BASE_URL;
+    delete process.env.KEPLER_PLANET_TOKEN;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("advanceTicks does not drain suit resources when nobody is deployed", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-tick-eva-inside-"));
+  const originalFetch = globalThis.fetch;
+
+  writeRegistration(cwd, {
+    habitatUuid: "uuid-tick",
+    habitatId: "habitat-tick-1",
+    displayName: "Tick Habitat",
+    apiToken: "token-tick",
+    moduleCount: 1,
+  });
+  writeModules(cwd, [
+    {
+      id: "module-suitport-1",
+      blueprintId: "basic-suitport",
+      displayName: "Basic Suitport",
+      connectedTo: [],
+      runtimeAttributes: { status: "active" },
+      capabilities: ["basic-suitport"],
+      source: "registration",
+    },
+  ]);
+
+  globalThis.fetch = Object.assign(async () =>
+    new Response(JSON.stringify({ irradianceWPerM2: 0, condition: "night" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }), { preconnect: () => {} }) as typeof fetch;
+  process.env.KEPLER_BASE_URL = "https://kepler.test";
+  process.env.KEPLER_PLANET_TOKEN = "test-token";
+
+  try {
+    const before = readExplorationState(cwd);
+    await advanceTicks(cwd, 3);
+    expect(readExplorationState(cwd)).toEqual(before);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.KEPLER_BASE_URL;
+    delete process.env.KEPLER_PLANET_TOKEN;
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("advanceTicks rolls back tick count, power state, suit resources, and alerts together when alert persistence fails", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-tick-eva-rollback-"));
+  const originalFetch = globalThis.fetch;
+
+  writeRegistration(cwd, {
+    habitatUuid: "uuid-tick",
+    habitatId: "habitat-tick-1",
+    displayName: "Tick Habitat",
+    apiToken: "token-tick",
+    moduleCount: 1,
+  });
+  writeAlertContract(cwd, {
+    schemaVersion: "1.0",
+    schema: {
+      type: "object",
+      required: ["kind", "severity", "status"],
+    },
+  });
+  writeModules(cwd, [
+    {
+      id: "module-battery-1",
+      blueprintId: "basic-battery",
+      displayName: "Basic Battery",
+      connectedTo: [],
+      runtimeAttributes: {
+        status: "active",
+        currentEnergyKwh: 10,
+        energyStorageKwh: 10,
+        powerDrawKw: { active: 3.6 },
+      },
+      capabilities: ["power-storage"],
+      source: "registration",
+    },
+  ]);
+  writeExplorationState(cwd, {
+    deployedHumanId: "human-1",
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+    batteryPercent: 30,
+    maxBatteryPercent: 100,
+    batteryDrainPerTickPercent: 10,
+    oxygenUnits: 30,
+    maxOxygenUnits: 80,
+    oxygenDrainPerTickUnits: 10,
+  });
+
+  const database = new Database(path.join(cwd, ".habitat", "habitat.sqlite"));
+  database.exec(`
+    CREATE TRIGGER fail_alert_insert
+    BEFORE INSERT ON alerts
+    BEGIN
+      SELECT RAISE(ABORT, 'alert insert blocked');
+    END;
+  `);
+
+  globalThis.fetch = Object.assign(async () =>
+    new Response(JSON.stringify({ irradianceWPerM2: 0, condition: "night" }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    }), { preconnect: () => {} }) as typeof fetch;
+  process.env.KEPLER_BASE_URL = "https://kepler.test";
+  process.env.KEPLER_PLANET_TOKEN = "test-token";
+
+  try {
+    const tickBefore = readCurrentTick(cwd);
+    const modulesBefore = readModules(cwd);
+    const explorationBefore = readExplorationState(cwd);
+    const alertsBefore = readAlerts(cwd);
+
+    await expect(advanceTicks(cwd, 1)).rejects.toThrow("alert insert blocked");
+    expect(readCurrentTick(cwd)).toBe(tickBefore);
+    expect(readModules(cwd)).toEqual(modulesBefore);
+    expect(readExplorationState(cwd)).toEqual(explorationBefore);
+    expect(readAlerts(cwd)).toEqual(alertsBefore);
+  } finally {
+    globalThis.fetch = originalFetch;
+    delete process.env.KEPLER_BASE_URL;
+    delete process.env.KEPLER_PLANET_TOKEN;
     rmSync(cwd, { recursive: true, force: true });
   }
 });

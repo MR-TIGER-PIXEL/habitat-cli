@@ -4,6 +4,8 @@ import { ApiError, createApiClient } from "../api/client";
 import {
   deleteRegistration,
   hydrateRegistrationState,
+  persistTickStateSnapshot,
+  readAlerts,
   readInventory,
   readExplorationState,
   readCurrentTick,
@@ -20,24 +22,29 @@ import {
   type BackendInventoryEntry,
 } from "./registration-store";
 import { assertModuleNotOccupied } from "./human-service";
+import { applyAlertObservation } from "./alert-service";
 import {
   cancelConstructionJob,
   listActiveConstructionJobs,
   planConstruction,
   resolveConfig,
-  runPowerTicks,
   startConstruction,
   writeBlueprintCatalog,
   type ConstructionPlan,
   type StartedConstruction,
+  simulatePowerTicks,
+  type PowerTickResult,
   type SolarIrradiance,
 } from "../kepler";
 import type {
+  AlertContract,
+  HabitatAlert,
   HabitatRegistrationResponse,
   LocalHabitatModule,
   ModuleRuntimeStatus,
   StoredBlueprint,
 } from "../kepler";
+import { assertExplorerOperational, drainEvaResourcesForTicks, isBatteryLow, isOxygenLow } from "./eva-state";
 
 type KeplerStatusResponse = {
   habitat: {
@@ -77,7 +84,7 @@ type KeplerEnvironment = {
   token: string;
 };
 
-class HabitatServiceClientError extends Error {
+export class HabitatServiceClientError extends Error {
   constructor(
     message: string,
     public readonly status: number,
@@ -310,10 +317,25 @@ export async function getModulePowerStatus(cwd: string): Promise<{
   };
 }
 
-export async function advanceTicks(cwd: string, count: number): Promise<ReturnType<typeof runPowerTicks>> {
+export async function advanceTicks(cwd: string, count: number): Promise<Omit<PowerTickResult, "modules">> {
   ensureRegistered(cwd);
   const solar = await getSolarIrradiance();
-  return runPowerTicks(resolveConfig(cwd), count, solar as SolarIrradiance);
+  const simulated = simulatePowerTicks(readModules(cwd), readCurrentTick(cwd), count, solar as SolarIrradiance);
+  const currentExploration = readExplorationState(cwd);
+  const exploration = applyTickDrainToExplorationState(currentExploration, count);
+  const alerts = applyTickDrainAlerts(
+    readAlerts(cwd),
+    readAlertContract(cwd),
+    currentExploration,
+    count,
+  );
+  const { modules, ...tick } = simulated;
+  return persistTickStateSnapshot(cwd, {
+    tick,
+    modules,
+    exploration,
+    alerts,
+  });
 }
 
 export function planConstructionForHabitat(cwd: string, blueprintId: string): ConstructionPlan {
@@ -427,6 +449,14 @@ export async function scanWorld(
   if (!exploration.deployedHumanId) {
     throw new HabitatServiceClientError("No human is currently deployed.", 400);
   }
+  try {
+    assertExplorerOperational(exploration);
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new HabitatServiceClientError(error.message, 400);
+    }
+    throw error;
+  }
 
   validateWorldScanIntegerInRange(
     input.sensorStrength,
@@ -455,6 +485,74 @@ export async function scanWorld(
   return kepler.requestJson(`/world/scan?${query.toString()}`, {
     method: "GET",
   });
+}
+
+function applyTickDrainToExplorationState(
+  exploration: ReturnType<typeof readExplorationState>,
+  count: number,
+) {
+  return drainEvaResourcesForTicks(exploration, count);
+}
+
+function applyTickDrainAlerts(
+  alerts: HabitatAlert[],
+  contract: AlertContract | null,
+  exploration: ReturnType<typeof readExplorationState>,
+  count: number,
+): HabitatAlert[] {
+  if (!exploration.deployedHumanId) {
+    return alerts;
+  }
+
+  let nextAlerts = alerts;
+  let tickState: ReturnType<typeof readExplorationState> = {
+    ...exploration,
+    batteryPercent: exploration.batteryPercent ?? exploration.maxBatteryPercent,
+    oxygenUnits: exploration.oxygenUnits ?? exploration.maxOxygenUnits,
+  };
+
+  for (let tick = 0; tick < count; tick += 1) {
+    tickState = drainEvaResourcesForTicks(tickState, 1);
+
+    if (isBatteryLow(tickState)) {
+      nextAlerts = applyAlertObservation(nextAlerts, contract, {
+        id: `alert:eva-battery-low:${tickState.deployedHumanId}`,
+        type: "eva.battery-low",
+        severity: "warning",
+        source: "local.eva",
+        subjectHumanId: tickState.deployedHumanId ?? undefined,
+      });
+    }
+    if ((tickState.batteryPercent ?? 0) <= 0) {
+      nextAlerts = applyAlertObservation(nextAlerts, contract, {
+        id: `alert:eva-battery-exhausted:${tickState.deployedHumanId}`,
+        type: "eva.battery-exhausted",
+        severity: "critical",
+        source: "local.eva",
+        subjectHumanId: tickState.deployedHumanId ?? undefined,
+      });
+    }
+    if (isOxygenLow(tickState)) {
+      nextAlerts = applyAlertObservation(nextAlerts, contract, {
+        id: `alert:eva-oxygen-low:${tickState.deployedHumanId}`,
+        type: "eva.oxygen-low",
+        severity: "warning",
+        source: "local.eva",
+        subjectHumanId: tickState.deployedHumanId ?? undefined,
+      });
+    }
+    if ((tickState.oxygenUnits ?? 0) <= 0) {
+      nextAlerts = applyAlertObservation(nextAlerts, contract, {
+        id: `alert:eva-oxygen-exhausted:${tickState.deployedHumanId}`,
+        type: "eva.oxygen-exhausted",
+        severity: "critical",
+        source: "local.eva",
+        subjectHumanId: tickState.deployedHumanId ?? undefined,
+      });
+    }
+  }
+
+  return nextAlerts;
 }
 
 function createKeplerClient() {

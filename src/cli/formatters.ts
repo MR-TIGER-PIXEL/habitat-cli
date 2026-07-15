@@ -13,6 +13,7 @@ import {
   type HabitatAlert,
 } from "../kepler";
 import type { BackendWorldScanResponse } from "../api/backend-api";
+import { estimateEvaTicksRemaining } from "../backend/eva-state";
 
 function printAlignedTable(headers: string[], rows: string[][]): void {
   const widths = headers.map((header, index) =>
@@ -211,6 +212,13 @@ export function printEvaStatus(state: ExplorationState): void {
   console.log(`position: (${state.x}, ${state.y})`);
   console.log(`carriedResources: ${JSON.stringify(state.carriedResources)}`);
   console.log(`maxCarryingCapacityKg: ${state.maxCarryingCapacityKg}`);
+  console.log(`batteryPercent: ${state.batteryPercent ?? "(inside habitat)"}`);
+  console.log(`maxBatteryPercent: ${state.maxBatteryPercent}`);
+  console.log(`batteryDrainPerTickPercent: ${state.batteryDrainPerTickPercent}`);
+  console.log(`oxygenUnits: ${state.oxygenUnits ?? "(inside habitat)"}`);
+  console.log(`maxOxygenUnits: ${state.maxOxygenUnits}`);
+  console.log(`oxygenDrainPerTickUnits: ${state.oxygenDrainPerTickUnits}`);
+  console.log(`estimatedTicksRemaining: ${estimateEvaTicksRemaining(state) ?? "(not deployed)"}`);
 }
 
 export function printModuleStatus(result: {

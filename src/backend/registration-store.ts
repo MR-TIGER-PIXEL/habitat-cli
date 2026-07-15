@@ -2,13 +2,14 @@ import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { Database } from "bun:sqlite";
 import {
-  DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
   type AlertContract,
   type HabitatAlert,
   type ExplorationState,
   type LocalHabitatModule,
+  type PowerTickResult,
   type StarterHuman,
 } from "../kepler";
+import { createDefaultEvaState, clearDeployedEvaState } from "./eva-state";
 
 export type BackendRegistration = {
   habitatUuid: string;
@@ -294,13 +295,7 @@ export function writeAlerts(cwd: string, alerts: HabitatAlert[]): void {
 }
 
 export function createDefaultExplorationState(): ExplorationState {
-  return {
-    deployedHumanId: null,
-    x: 0,
-    y: 0,
-    carriedResources: {},
-    maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
-  };
+  return createDefaultEvaState();
 }
 
 export function readExplorationState(cwd: string): ExplorationState {
@@ -313,7 +308,10 @@ export function readExplorationState(cwd: string): ExplorationState {
     return createDefaultExplorationState();
   }
 
-  return JSON.parse(row.state_json) as ExplorationState;
+  return {
+    ...createDefaultExplorationState(),
+    ...(JSON.parse(row.state_json) as Partial<ExplorationState>),
+  };
 }
 
 export function writeExplorationState(cwd: string, state: ExplorationState): void {
@@ -494,13 +492,7 @@ export function dockExplorerState(
       insertHuman.run(human.id, JSON.stringify(human));
     }
 
-    const nextState: ExplorationState = {
-      ...exploration,
-      deployedHumanId: null,
-      x: 0,
-      y: 0,
-      carriedResources: {},
-    };
+    const nextState = clearDeployedEvaState(exploration);
     database
       .query(
         `INSERT INTO exploration_state (id, state_json)
@@ -511,6 +503,54 @@ export function dockExplorerState(
       .run(JSON.stringify(nextState));
 
     return nextState;
+  });
+
+  return transaction(input);
+}
+
+export function persistTickStateSnapshot(
+  cwd: string,
+  input: {
+    tick: Omit<PowerTickResult, "modules">;
+    modules: LocalHabitatModule[];
+    exploration: ExplorationState;
+    alerts: HabitatAlert[];
+  },
+): Omit<PowerTickResult, "modules"> {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  const transaction = database.transaction((payload: typeof input) => {
+    database.query("DELETE FROM modules").run();
+    const insertModule = database.query("INSERT INTO modules (id, module_json) VALUES (?, ?)");
+    for (const module of payload.modules) {
+      insertModule.run(module.id, JSON.stringify(module));
+    }
+
+    database
+      .query(
+        `INSERT INTO tick_state (id, current_tick)
+         VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           current_tick = excluded.current_tick`,
+      )
+      .run(payload.tick.endTick);
+
+    database
+      .query(
+        `INSERT INTO exploration_state (id, state_json)
+         VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           state_json = excluded.state_json`,
+      )
+      .run(JSON.stringify(payload.exploration));
+
+    database.query("DELETE FROM alerts").run();
+    const insertAlert = database.query("INSERT INTO alerts (id, alert_json) VALUES (?, ?)");
+    for (const alert of payload.alerts) {
+      insertAlert.run(alert.id, JSON.stringify(alert));
+    }
+
+    return payload.tick;
   });
 
   return transaction(input);

@@ -4,7 +4,11 @@ import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node
 import os from "node:os";
 import path from "node:path";
 import {
+  DEFAULT_EVA_BATTERY_DRAIN_PER_TICK_PERCENT,
+  DEFAULT_EVA_MAX_BATTERY_PERCENT,
   DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+  DEFAULT_EVA_MAX_OXYGEN_UNITS,
+  DEFAULT_EVA_OXYGEN_DRAIN_PER_TICK_UNITS,
   createModule,
   deleteModule,
   formatModuleListEntry,
@@ -2461,6 +2465,12 @@ test("eva commands deploy, move, dock, and report persisted status through the l
     y: 0,
     carriedResources: {},
     maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+    batteryPercent: null,
+    maxBatteryPercent: DEFAULT_EVA_MAX_BATTERY_PERCENT,
+    batteryDrainPerTickPercent: DEFAULT_EVA_BATTERY_DRAIN_PER_TICK_PERCENT,
+    oxygenUnits: null,
+    maxOxygenUnits: DEFAULT_EVA_MAX_OXYGEN_UNITS,
+    oxygenDrainPerTickUnits: DEFAULT_EVA_OXYGEN_DRAIN_PER_TICK_UNITS,
   });
   expect(readExplorationStateJson(habitatDirectory)).toBe(`${JSON.stringify({
     deployedHumanId: null,
@@ -2468,6 +2478,12 @@ test("eva commands deploy, move, dock, and report persisted status through the l
     y: 0,
     carriedResources: {},
     maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+    batteryPercent: null,
+    maxBatteryPercent: DEFAULT_EVA_MAX_BATTERY_PERCENT,
+    batteryDrainPerTickPercent: DEFAULT_EVA_BATTERY_DRAIN_PER_TICK_PERCENT,
+    oxygenUnits: null,
+    maxOxygenUnits: DEFAULT_EVA_MAX_OXYGEN_UNITS,
+    oxygenDrainPerTickUnits: DEFAULT_EVA_OXYGEN_DRAIN_PER_TICK_UNITS,
   }, null, 2)}\n`);
 
   rmSync(cwd, { recursive: true, force: true });
@@ -2548,6 +2564,12 @@ test("eva dock transfers carried resources into local inventory exactly once and
     y: 0,
     carriedResources: {},
     maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+    batteryPercent: null,
+    maxBatteryPercent: DEFAULT_EVA_MAX_BATTERY_PERCENT,
+    batteryDrainPerTickPercent: DEFAULT_EVA_BATTERY_DRAIN_PER_TICK_PERCENT,
+    oxygenUnits: null,
+    maxOxygenUnits: DEFAULT_EVA_MAX_OXYGEN_UNITS,
+    oxygenDrainPerTickUnits: DEFAULT_EVA_OXYGEN_DRAIN_PER_TICK_UNITS,
   });
   expect(readInventoryJson(habitatDirectory)).toBe(`${JSON.stringify({
     ferrite: 7,
@@ -2692,6 +2714,12 @@ test("collect sends the deployed explorer's saved position through the local Hab
     y: 0,
     carriedResources: { ferrite: 5 },
     maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+    batteryPercent: null,
+    maxBatteryPercent: DEFAULT_EVA_MAX_BATTERY_PERCENT,
+    batteryDrainPerTickPercent: DEFAULT_EVA_BATTERY_DRAIN_PER_TICK_PERCENT,
+    oxygenUnits: null,
+    maxOxygenUnits: DEFAULT_EVA_MAX_OXYGEN_UNITS,
+    oxygenDrainPerTickUnits: DEFAULT_EVA_OXYGEN_DRAIN_PER_TICK_UNITS,
   }, null, 2)}\n`);
 
   rmSync(cwd, { recursive: true, force: true });
@@ -2973,6 +3001,46 @@ test("scan rejects invalid radius 6", () => {
 
   expect(result.exitCode).toBe(1);
   expect(result.stderr.toString()).toContain('Invalid radiusTiles "6". Use an integer from 0 through 5.');
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("scan surfaces exhausted explorer errors from the backend without changing EVA state", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory);
+
+  const database = createLocalStateDatabase(habitatDirectory);
+  database
+    .query(
+      `INSERT INTO exploration_state (id, state_json)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET state_json = excluded.state_json`,
+    )
+    .run(JSON.stringify({
+      deployedHumanId: "human-1",
+      x: 0,
+      y: 0,
+      carriedResources: {},
+      maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+      batteryPercent: 20,
+      maxBatteryPercent: DEFAULT_EVA_MAX_BATTERY_PERCENT,
+      batteryDrainPerTickPercent: DEFAULT_EVA_BATTERY_DRAIN_PER_TICK_PERCENT,
+      oxygenUnits: 0,
+      maxOxygenUnits: DEFAULT_EVA_MAX_OXYGEN_UNITS,
+      oxygenDrainPerTickUnits: DEFAULT_EVA_OXYGEN_DRAIN_PER_TICK_UNITS,
+    }));
+
+  const before = readExplorationStateJson(habitatDirectory);
+  const result = runCli(cwd, "scan", "--strength", "100", "--radius", "0");
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain(
+    "Explorer oxygen is exhausted. The explorer did not return in time.",
+  );
+  expect(result.stderr.toString()).not.toContain("500 Internal Server Error");
+  expect(readExplorationStateJson(habitatDirectory)).toBe(before);
 
   rmSync(cwd, { recursive: true, force: true });
 });

@@ -2,9 +2,14 @@ import { createApiClient } from "../api/client";
 import type { ExplorationState, LocalHabitatModule, StarterHuman, WorldSectorBounds } from "../kepler";
 import {
   observeExplorerDeployedAlert,
+  resolveBatteryExhaustedAlert,
+  resolveBatteryLowAlert,
   resolveCarryingCapacityAlert,
+  resolveOxygenExhaustedAlert,
+  resolveOxygenLowAlert,
   resolveExplorerDeployedAlert,
 } from "./alert-service";
+import { assertExplorerOperational, createDeployedEvaState } from "./eva-state";
 import {
   dockExplorerState,
   readExplorationState,
@@ -40,14 +45,13 @@ export async function deployHuman(cwd: string, humanId: string): Promise<Explora
     throw new Error(`Human "${humanId}" must currently be in active Basic Suitport module "${suitport.id}".`);
   }
 
-  const nextState: ExplorationState = {
-    ...exploration,
-    deployedHumanId: human.id,
-    x: 0,
-    y: 0,
-  };
+  const nextState = createDeployedEvaState(exploration, human.id);
   writeExplorationState(cwd, nextState);
   await observeExplorerDeployedAlert(cwd, { humanId: human.id });
+  resolveBatteryLowAlert(cwd, { humanId: human.id });
+  resolveBatteryExhaustedAlert(cwd, { humanId: human.id });
+  resolveOxygenLowAlert(cwd, { humanId: human.id });
+  resolveOxygenExhaustedAlert(cwd, { humanId: human.id });
   return nextState;
 }
 
@@ -60,6 +64,7 @@ export async function moveExplorer(
   if (!exploration.deployedHumanId) {
     throw new Error("No human is currently deployed.");
   }
+  assertExplorerOperational(exploration);
 
   assertAdjacentMove(exploration, destination);
   const sectorBounds = await getCurrentWorldSectorBounds(cwd);
@@ -99,6 +104,10 @@ export async function dockExplorer(cwd: string): Promise<ExplorationState> {
   });
   resolveExplorerDeployedAlert(cwd, { humanId: exploration.deployedHumanId });
   resolveCarryingCapacityAlert(cwd, { humanId: exploration.deployedHumanId });
+  resolveBatteryLowAlert(cwd, { humanId: exploration.deployedHumanId });
+  resolveBatteryExhaustedAlert(cwd, { humanId: exploration.deployedHumanId });
+  resolveOxygenLowAlert(cwd, { humanId: exploration.deployedHumanId });
+  resolveOxygenExhaustedAlert(cwd, { humanId: exploration.deployedHumanId });
   return nextState;
 }
 

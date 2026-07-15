@@ -11,6 +11,7 @@ import {
   readRegistration,
   writeExplorationState,
 } from "./registration-store";
+import { assertExplorerOperational } from "./eva-state";
 
 export type CollectionResult = {
   resourceType: string;
@@ -36,6 +37,7 @@ export async function collectMaterial(cwd: string, quantityKg: number): Promise<
   if (!exploration.deployedHumanId) {
     throw new Error("No human is currently deployed.");
   }
+  assertExplorerOperational(exploration);
   if (!Number.isInteger(quantityKg) || quantityKg <= 0) {
     throw new Error("Collection quantity must be a positive whole number of kilograms.");
   }

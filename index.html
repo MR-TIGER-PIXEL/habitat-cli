@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Habitat Dashboard</title>
+    <script>
+      (() => {
+        const saved = window.localStorage.getItem("habitat-dashboard-theme");
+        const preferredDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+        const mode = saved === "light" || saved === "dark" ? saved : preferredDark ? "dark" : "light";
+        document.documentElement.dataset.theme = mode;
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/web/main.tsx"></script>
+  </body>
+ </html>

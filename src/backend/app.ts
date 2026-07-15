@@ -1,3 +1,5 @@
+import { existsSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { ApiError } from "../api/client";
 import { Hono } from "hono";
 import {
@@ -27,6 +29,9 @@ import {
   updateModule,
   unregisterHabitat,
 } from "./habitat-service";
+import { deployHuman, dockExplorer, getEvaStatus, moveExplorer } from "./eva-service";
+import { collectMaterial } from "./collection-service";
+import { listHumans as readStoredHumans, moveHuman as moveStoredHuman } from "./human-service";
 import type { BackendRegistration } from "./registration-store";
 
 type PublicRegistration = Omit<BackendRegistration, "apiToken">;
@@ -43,6 +48,7 @@ type StatusResult = {
 
 export type BackendAppOptions = {
   cwd?: string;
+  staticAssetDir?: string;
   readRegistration?: () => Promise<BackendRegistration | null> | BackendRegistration | null;
   getRegistration?: () => Promise<BackendRegistration | null> | BackendRegistration | null;
   registerHabitat?: (displayName: string) => Promise<unknown>;
@@ -53,12 +59,17 @@ export type BackendAppOptions = {
   listOfficialResources?: () => Promise<unknown>;
   getSolarIrradiance?: () => Promise<unknown>;
   scanWorld?: (input: {
-    x: number;
-    y: number;
     sensorStrength: number;
     radiusTiles: number;
   }) => Promise<unknown>;
   listModules?: () => Promise<unknown>;
+  listHumans?: () => Promise<unknown>;
+  moveHuman?: (humanId: string, moduleId: string) => Promise<unknown>;
+  getEvaStatus?: () => Promise<unknown>;
+  deployHuman?: (humanId: string) => Promise<unknown>;
+  moveExplorer?: (input: { x: number; y: number }) => Promise<unknown>;
+  dockExplorer?: () => Promise<unknown>;
+  collectMaterial?: (quantityKg: number) => Promise<unknown>;
   getModule?: (moduleReference: string) => Promise<unknown>;
   createModule?: (input: unknown) => Promise<unknown>;
   updateModule?: (moduleReference: string, input: unknown) => Promise<unknown>;
@@ -78,6 +89,7 @@ export type BackendAppOptions = {
 export function createApp(options: BackendAppOptions = {}): Hono {
   const app = new Hono();
   const cwd = options.cwd ?? process.cwd();
+  const staticAssetDir = options.staticAssetDir ?? path.join(cwd, "dist");
   const readRegistration =
     options.readRegistration ?? options.getRegistration ?? (() => getRegistration(cwd));
   const register = options.registerHabitat ?? ((displayName: string) => registerHabitat(cwd, displayName));
@@ -88,12 +100,17 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   const readResources = options.listOfficialResources ?? (() => listOfficialResources());
   const readSolar = options.getSolarIrradiance ?? (() => getSolarIrradiance());
   const scanWorldHandler = options.scanWorld ?? ((input: {
-    x: number;
-    y: number;
     sensorStrength: number;
     radiusTiles: number;
   }) => scanWorld(cwd, input));
   const readModules = options.listModules ?? (() => listModules(cwd));
+  const readHumans = options.listHumans ?? (() => readStoredHumans(cwd));
+  const moveHumanHandler = options.moveHuman ?? ((humanId: string, moduleId: string) => moveStoredHuman(cwd, humanId, moduleId));
+  const readEvaStatus = options.getEvaStatus ?? (() => getEvaStatus(cwd));
+  const deployHumanHandler = options.deployHuman ?? ((humanId: string) => deployHuman(cwd, humanId));
+  const moveExplorerHandler = options.moveExplorer ?? ((input: { x: number; y: number }) => moveExplorer(cwd, input));
+  const dockExplorerHandler = options.dockExplorer ?? (() => dockExplorer(cwd));
+  const collectMaterialHandler = options.collectMaterial ?? ((quantityKg: number) => collectMaterial(cwd, quantityKg));
   const readModule = options.getModule ?? ((moduleReference: string) => getModule(cwd, moduleReference));
   const createModuleHandler = options.createModule ?? ((input: unknown) => createModule(cwd, input as never));
   const updateModuleHandler = options.updateModule ?? ((moduleReference: string, input: unknown) => updateModule(cwd, moduleReference, input as never));
@@ -177,16 +194,8 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   });
 
   app.get("/scan", async (c) => {
-    const xValue = c.req.query("x");
-    const yValue = c.req.query("y");
     const sensorStrengthValue = c.req.query("sensorStrength");
     const radiusTilesValue = c.req.query("radiusTiles");
-
-    const parsedX = parseRequiredIntegerQuery(xValue, "x");
-    if ("error" in parsedX) return c.json({ error: { message: parsedX.error } }, 400);
-
-    const parsedY = parseRequiredIntegerQuery(yValue, "y");
-    if ("error" in parsedY) return c.json({ error: { message: parsedY.error } }, 400);
 
     const parsedSensorStrength = parseRequiredIntegerInRangeQuery(
       sensorStrengthValue,
@@ -208,8 +217,6 @@ export function createApp(options: BackendAppOptions = {}): Hono {
 
     try {
       const result = await scanWorldHandler({
-        x: parsedX.value,
-        y: parsedY.value,
         sensorStrength: parsedSensorStrength.value,
         radiusTiles: parsedRadiusTiles.value,
       });
@@ -231,6 +238,87 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   app.get("/modules", async (c) => {
     const modules = (await readModules()) as Array<unknown>;
     return c.json(modules);
+  });
+
+  app.get("/humans", async (c) => {
+    const humans = (await readHumans()) as Array<unknown>;
+    return c.json(humans);
+  });
+
+  app.put("/humans/:humanId/location", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { moduleId?: unknown };
+    if (typeof body.moduleId !== "string" || !body.moduleId.trim()) {
+      return c.json({ error: { message: "Missing module id." } }, 400);
+    }
+
+    try {
+      const result = await moveHumanHandler(c.req.param("humanId"), body.moduleId);
+      return c.json(result);
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
+    }
+  });
+
+  app.get("/eva", async (c) => {
+    try {
+      return c.json(await readEvaStatus());
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
+    }
+  });
+
+  app.post("/eva/deploy", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { humanId?: unknown };
+    if (typeof body.humanId !== "string" || !body.humanId.trim()) {
+      return c.json({ error: { message: "Missing human id." } }, 400);
+    }
+
+    try {
+      return c.json(await deployHumanHandler(body.humanId));
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+    }
+  });
+
+  app.post("/eva/move", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { x?: unknown; y?: unknown };
+    if (!Number.isInteger(body.x) || !Number.isInteger(body.y)) {
+      return c.json({ error: { message: "Missing EVA coordinates." } }, 400);
+    }
+
+    const x = body.x as number;
+    const y = body.y as number;
+
+    try {
+      return c.json(await moveExplorerHandler({ x, y }));
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+    }
+  });
+
+  app.post("/eva/dock", async (c) => {
+    try {
+      return c.json(await dockExplorerHandler());
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+    }
+  });
+
+  app.post("/collect", async (c) => {
+    const body = (await c.req.json().catch(() => ({}))) as { quantityKg?: unknown };
+    const quantityKg = typeof body.quantityKg === "string" ? Number(body.quantityKg) : body.quantityKg;
+    if (typeof quantityKg !== "number" || !Number.isInteger(quantityKg) || quantityKg <= 0) {
+      return c.json({ error: { message: "Collection quantity must be a positive whole number of kilograms." } }, 400);
+    }
+
+    try {
+      return c.json(await collectMaterialHandler(quantityKg));
+    } catch (error) {
+      if (error instanceof ApiError) {
+        return jsonErrorResponse(error.message, error.status);
+      }
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+    }
   });
 
   app.get("/modules/status", async (c) => {
@@ -352,6 +440,25 @@ export function createApp(options: BackendAppOptions = {}): Hono {
     return c.json(result);
   });
 
+  app.get("*", async (c) => {
+    const requestPath = c.req.path;
+    const assetResponse = serveStaticAsset(staticAssetDir, requestPath);
+    if (assetResponse) {
+      return assetResponse;
+    }
+
+    const indexPath = path.join(staticAssetDir, "index.html");
+    if (existsSync(indexPath) && shouldServeIndexHtml(requestPath)) {
+      return new Response(readFileSync(indexPath), {
+        headers: {
+          "content-type": "text/html; charset=utf-8",
+        },
+      });
+    }
+
+    return c.notFound();
+  });
+
   return app;
 }
 
@@ -406,4 +513,55 @@ function jsonErrorResponse(message: string, status: number): Response {
       "content-type": "application/json",
     },
   });
+}
+
+function serveStaticAsset(staticAssetDir: string, requestPath: string): Response | null {
+  const normalizedPath = requestPath === "/" ? "/index.html" : requestPath;
+  const assetPath = path.join(staticAssetDir, normalizedPath.replace(/^\/+/, ""));
+
+  if (!assetPath.startsWith(staticAssetDir) || !existsSync(assetPath)) {
+    return null;
+  }
+
+  return new Response(readFileSync(assetPath), {
+    headers: {
+      "content-type": getContentType(assetPath),
+    },
+  });
+}
+
+function shouldServeIndexHtml(requestPath: string): boolean {
+  return requestPath === "/" || !path.basename(requestPath).includes(".");
+}
+
+function getContentType(filePath: string): string {
+  const extension = path.extname(filePath).toLowerCase();
+
+  switch (extension) {
+    case ".html":
+      return "text/html; charset=utf-8";
+    case ".css":
+      return "text/css; charset=utf-8";
+    case ".js":
+      return "text/javascript; charset=utf-8";
+    case ".mjs":
+      return "text/javascript; charset=utf-8";
+    case ".json":
+      return "application/json; charset=utf-8";
+    case ".svg":
+      return "image/svg+xml";
+    case ".png":
+      return "image/png";
+    case ".jpg":
+    case ".jpeg":
+      return "image/jpeg";
+    case ".webp":
+      return "image/webp";
+    case ".woff":
+      return "font/woff";
+    case ".woff2":
+      return "font/woff2";
+    default:
+      return "application/octet-stream";
+  }
 }

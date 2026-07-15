@@ -1,4 +1,7 @@
 import { expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { createApp } from "./app";
 import { ApiError } from "../api/client";
 
@@ -272,11 +275,9 @@ test("catalog and solar routes proxy backend handlers", async () => {
   });
 });
 
-test("GET /scan validates query parameters, forwards to the backend handler, and returns the scan unchanged", async () => {
+test("GET /scan validates query parameters, forwards them to the backend handler, and returns the scan unchanged", async () => {
   const app = createApp({
     scanWorld: async (input: {
-      x: number;
-      y: number;
       sensorStrength: number;
       radiusTiles: number;
     }) => ({
@@ -287,15 +288,13 @@ test("GET /scan validates query parameters, forwards to the backend handler, and
   });
 
   const response = await app.request(
-    "/scan?x=4&y=-2&sensorStrength=75&radiusTiles=3",
+    "/scan?sensorStrength=75&radiusTiles=3",
   );
 
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({
     habitatId: "habitat-123",
     echoed: {
-      x: 4,
-      y: -2,
       sensorStrength: 75,
       radiusTiles: 3,
     },
@@ -310,19 +309,13 @@ test("GET /scan returns clear client errors for invalid query parameters", async
     },
   });
 
-  const invalidX = await app.request("/scan?x=1.5&y=2&sensorStrength=75&radiusTiles=3");
-  expect(invalidX.status).toBe(400);
-  expect(await invalidX.json()).toEqual({
-    error: { message: 'Invalid x "1.5". Use an integer.' },
-  });
-
-  const invalidSensorStrength = await app.request("/scan?x=1&y=2&sensorStrength=101&radiusTiles=3");
+  const invalidSensorStrength = await app.request("/scan?sensorStrength=101&radiusTiles=3");
   expect(invalidSensorStrength.status).toBe(400);
   expect(await invalidSensorStrength.json()).toEqual({
     error: { message: 'Invalid sensorStrength "101". Use an integer from 0 through 100.' },
   });
 
-  const invalidRadiusTiles = await app.request("/scan?x=1&y=2&sensorStrength=75&radiusTiles=6");
+  const invalidRadiusTiles = await app.request("/scan?sensorStrength=75&radiusTiles=6");
   expect(invalidRadiusTiles.status).toBe(400);
   expect(await invalidRadiusTiles.json()).toEqual({
     error: { message: 'Invalid radiusTiles "6". Use an integer from 0 through 5.' },
@@ -336,7 +329,7 @@ test("GET /scan returns a clear error when no saved habitat registration exists"
     },
   });
 
-  const response = await app.request("/scan?x=1&y=2&sensorStrength=75&radiusTiles=3");
+  const response = await app.request("/scan?sensorStrength=75&radiusTiles=3");
 
   expect(response.status).toBe(404);
   expect(await response.json()).toEqual({
@@ -351,12 +344,122 @@ test("GET /scan preserves upstream error status and message", async () => {
     },
   });
 
-  const response = await app.request("/scan?x=1&y=2&sensorStrength=75&radiusTiles=3");
+  const response = await app.request("/scan?sensorStrength=75&radiusTiles=3");
 
   expect(response.status).toBe(404);
   expect(await response.json()).toEqual({
     error: { message: "Habitat is not registered." },
   });
+});
+
+test("eva routes proxy backend handlers", async () => {
+  const app = createApp({
+    getEvaStatus: async () => ({
+      deployedHumanId: null,
+      x: 0,
+      y: 0,
+      carriedResources: {},
+      maxCarryingCapacityKg: 20,
+    }),
+    deployHuman: async (humanId: string) => ({
+      deployedHumanId: humanId,
+      x: 0,
+      y: 0,
+      carriedResources: {},
+      maxCarryingCapacityKg: 20,
+    }),
+    moveExplorer: async (input: { x: number; y: number }) => ({
+      deployedHumanId: "human-1",
+      x: input.x,
+      y: input.y,
+      carriedResources: {},
+      maxCarryingCapacityKg: 20,
+    }),
+    dockExplorer: async () => ({
+      deployedHumanId: null,
+      x: 0,
+      y: 0,
+      carriedResources: {},
+      maxCarryingCapacityKg: 20,
+    }),
+  });
+
+  const status = await app.request("/eva");
+  expect(status.status).toBe(200);
+  expect(await status.json()).toEqual({
+    deployedHumanId: null,
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+  });
+
+  const deploy = await app.request("/eva/deploy", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ humanId: "human-1" }),
+  });
+  expect(deploy.status).toBe(200);
+  expect(await deploy.json()).toEqual({
+    deployedHumanId: "human-1",
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+  });
+
+  const move = await app.request("/eva/move", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ x: 1, y: 0 }),
+  });
+  expect(move.status).toBe(200);
+  expect(await move.json()).toEqual({
+    deployedHumanId: "human-1",
+    x: 1,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+  });
+
+  const dock = await app.request("/eva/dock", { method: "POST" });
+  expect(dock.status).toBe(200);
+  expect(await dock.json()).toEqual({
+    deployedHumanId: null,
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: 20,
+  });
+});
+
+test("POST /collect validates quantity and proxies successful collection through the backend", async () => {
+  const quantities: number[] = [];
+  const app = createApp({
+    collectMaterial: async (quantityKg: number) => {
+      quantities.push(quantityKg);
+      return { resourceType: "ferrite", collectedKg: quantityKg, remainingKg: 175 };
+    },
+  });
+
+  const invalid = await app.request("/collect", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ quantityKg: "0" }),
+  });
+  expect(invalid.status).toBe(400);
+  expect(await invalid.json()).toEqual({
+    error: { message: "Collection quantity must be a positive whole number of kilograms." },
+  });
+
+  const collected = await app.request("/collect", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ quantityKg: "5" }),
+  });
+  expect(collected.status).toBe(200);
+  expect(await collected.json()).toEqual({ resourceType: "ferrite", collectedKg: 5, remainingKg: 175 });
+  expect(quantities).toEqual([5]);
 });
 
 test("module and inventory routes proxy backend handlers", async () => {
@@ -504,4 +607,117 @@ test("module and inventory routes proxy backend handlers", async () => {
   expect(await inventory.json()).toEqual([
     { resourceType: "ferrite", quantity: 90 },
   ]);
+});
+
+test("GET /humans returns the stored humans as json", async () => {
+  const app = createApp({
+    listHumans: async () => ([
+      {
+        id: "human-1",
+        displayName: "Crew Member 1",
+        locationModuleId: "module-command-1",
+      },
+      {
+        id: "human-2",
+        displayName: "Crew Member 2",
+        locationModuleId: "module-suitport-1",
+      },
+    ]),
+  });
+
+  const response = await app.request("/humans");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual([
+    {
+      id: "human-1",
+      displayName: "Crew Member 1",
+      locationModuleId: "module-command-1",
+    },
+    {
+      id: "human-2",
+      displayName: "Crew Member 2",
+      locationModuleId: "module-suitport-1",
+    },
+  ]);
+});
+
+test("human routes proxy backend handlers", async () => {
+  const app = createApp({
+    listHumans: async () => ([
+      {
+        id: "human-1",
+        displayName: "Crew Member 1",
+        locationModuleId: "module-command-1",
+      },
+    ]),
+    moveHuman: async (humanId: string, moduleId: string) => ({
+      id: humanId,
+      displayName: "Crew Member 1",
+      locationModuleId: moduleId,
+    }),
+  });
+
+  const moved = await app.request("/humans/human-1/location", {
+    method: "PUT",
+    body: JSON.stringify({ moduleId: "module-lab-1" }),
+    headers: { "content-type": "application/json" },
+  });
+
+  expect(moved.status).toBe(200);
+  expect(await moved.json()).toEqual({
+    id: "human-1",
+    displayName: "Crew Member 1",
+    locationModuleId: "module-lab-1",
+  });
+});
+
+test("GET / serves the dashboard shell when a static asset directory is configured", async () => {
+  const staticDir = mkdtempSync(path.join(os.tmpdir(), "habitat-dashboard-"));
+
+  try {
+    writeFileSync(path.join(staticDir, "index.html"), "<!doctype html><html><body><div id=\"root\"></div></body></html>");
+
+    const app = createApp({ staticAssetDir: staticDir });
+    const response = await app.request("/");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/html");
+    expect(await response.text()).toContain("<div id=\"root\"></div>");
+  } finally {
+    rmSync(staticDir, { recursive: true, force: true });
+  }
+});
+
+test("GET /registration still returns JSON when static assets are enabled", async () => {
+  const staticDir = mkdtempSync(path.join(os.tmpdir(), "habitat-dashboard-"));
+
+  try {
+    writeFileSync(path.join(staticDir, "index.html"), "<!doctype html><html><body><div id=\"root\"></div></body></html>");
+
+    const app = createApp({
+      staticAssetDir: staticDir,
+      readRegistration: () => ({
+        habitatUuid: "uuid-123",
+        habitatId: "habitat-123",
+        displayName: "Starlight Forge",
+        apiToken: "token-abc",
+        moduleCount: 2,
+      }),
+    });
+
+    const response = await app.request("/registration");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("application/json");
+    expect(await response.json()).toEqual({
+      registration: {
+        habitatUuid: "uuid-123",
+        habitatId: "habitat-123",
+        displayName: "Starlight Forge",
+        moduleCount: 2,
+      },
+    });
+  } finally {
+    rmSync(staticDir, { recursive: true, force: true });
+  }
 });

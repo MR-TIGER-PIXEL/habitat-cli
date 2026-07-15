@@ -1,7 +1,14 @@
 import { existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { Database } from "bun:sqlite";
-import type { LocalHabitatModule } from "../kepler";
+import {
+  DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+  type AlertContract,
+  type HabitatAlert,
+  type ExplorationState,
+  type LocalHabitatModule,
+  type StarterHuman,
+} from "../kepler";
 
 export type BackendRegistration = {
   habitatUuid: string;
@@ -59,6 +66,26 @@ function openDatabase(cwd: string): Database {
     CREATE TABLE IF NOT EXISTS modules (
       id TEXT PRIMARY KEY,
       module_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS humans (
+      id TEXT PRIMARY KEY,
+      human_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS alert_contract (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      contract_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS alerts (
+      id TEXT PRIMARY KEY,
+      alert_json TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS exploration_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      state_json TEXT NOT NULL
     );
 
     CREATE TABLE IF NOT EXISTS inventory (
@@ -150,7 +177,10 @@ export function writeRegistration(cwd: string, registration: BackendRegistration
 export function deleteRegistration(cwd: string): void {
   const database = openDatabase(cwd);
   database.query("DELETE FROM registration WHERE id = 1").run();
+  database.query("DELETE FROM alert_contract WHERE id = 1").run();
+  database.query("DELETE FROM alerts").run();
   database.query("DELETE FROM tick_state WHERE id = 1").run();
+  database.query("DELETE FROM exploration_state WHERE id = 1").run();
 }
 
 export function readCurrentTick(cwd: string): number {
@@ -182,6 +212,14 @@ export function readModules(cwd: string): LocalHabitatModule[] {
   return rows.map((row) => JSON.parse(row.module_json) as LocalHabitatModule);
 }
 
+export function readHumans(cwd: string): StarterHuman[] {
+  const database = openDatabase(cwd);
+  const rows = database.query<{ human_json: string }, []>(
+    "SELECT human_json FROM humans ORDER BY rowid",
+  ).all();
+  return rows.map((row) => JSON.parse(row.human_json) as StarterHuman);
+}
+
 export function writeModules(cwd: string, modules: LocalHabitatModule[]): void {
   ensureBackendDirectory(cwd);
   const database = openDatabase(cwd);
@@ -193,6 +231,192 @@ export function writeModules(cwd: string, modules: LocalHabitatModule[]): void {
     }
   });
   transaction(modules);
+}
+
+export function writeHumans(cwd: string, humans: StarterHuman[]): void {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  const transaction = database.transaction((items: StarterHuman[]) => {
+    database.query("DELETE FROM humans").run();
+    const insert = database.query("INSERT INTO humans (id, human_json) VALUES (?, ?)");
+    for (const human of items) {
+      insert.run(human.id, JSON.stringify(human));
+    }
+  });
+  transaction(humans);
+}
+
+export function readAlertContract(cwd: string): AlertContract | null {
+  const database = openDatabase(cwd);
+  const row = database.query<{ contract_json: string }, []>(
+    "SELECT contract_json FROM alert_contract WHERE id = 1",
+  ).get();
+
+  if (!row) {
+    return null;
+  }
+
+  return JSON.parse(row.contract_json) as AlertContract;
+}
+
+export function writeAlertContract(cwd: string, contract: AlertContract): void {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  database
+    .query(
+      `INSERT INTO alert_contract (id, contract_json)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         contract_json = excluded.contract_json`,
+    )
+    .run(JSON.stringify(contract));
+}
+
+export function readAlerts(cwd: string): HabitatAlert[] {
+  const database = openDatabase(cwd);
+  const rows = database.query<{ alert_json: string }, []>(
+    "SELECT alert_json FROM alerts ORDER BY rowid",
+  ).all();
+  return rows.map((row) => JSON.parse(row.alert_json) as HabitatAlert);
+}
+
+export function writeAlerts(cwd: string, alerts: HabitatAlert[]): void {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  const transaction = database.transaction((items: HabitatAlert[]) => {
+    database.query("DELETE FROM alerts").run();
+    const insert = database.query("INSERT INTO alerts (id, alert_json) VALUES (?, ?)");
+    for (const alert of items) {
+      insert.run(alert.id, JSON.stringify(alert));
+    }
+  });
+  transaction(alerts);
+}
+
+export function createDefaultExplorationState(): ExplorationState {
+  return {
+    deployedHumanId: null,
+    x: 0,
+    y: 0,
+    carriedResources: {},
+    maxCarryingCapacityKg: DEFAULT_EVA_MAX_CARRYING_CAPACITY_KG,
+  };
+}
+
+export function readExplorationState(cwd: string): ExplorationState {
+  const database = openDatabase(cwd);
+  const row = database.query<{ state_json: string }, []>(
+    "SELECT state_json FROM exploration_state WHERE id = 1",
+  ).get();
+
+  if (!row) {
+    return createDefaultExplorationState();
+  }
+
+  return JSON.parse(row.state_json) as ExplorationState;
+}
+
+export function writeExplorationState(cwd: string, state: ExplorationState): void {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  database
+    .query(
+      `INSERT INTO exploration_state (id, state_json)
+       VALUES (1, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         state_json = excluded.state_json`,
+    )
+    .run(JSON.stringify(state));
+}
+
+export function hydrateRegistrationState(
+  cwd: string,
+  input: {
+    registration: BackendRegistration;
+    alertContract: AlertContract;
+    modules: LocalHabitatModule[];
+    humans: StarterHuman[];
+  },
+): void {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  const transaction = database.transaction((payload: typeof input) => {
+    if (registrationTableHasBaseUrl(database)) {
+      const existingBaseUrl = readLegacyBaseUrl(database);
+      database
+        .query(
+          `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, base_url, api_token, module_count)
+           VALUES (1, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             habitat_uuid = excluded.habitat_uuid,
+             habitat_id = excluded.habitat_id,
+             display_name = excluded.display_name,
+             base_url = excluded.base_url,
+             api_token = excluded.api_token,
+             module_count = excluded.module_count`,
+        )
+        .run(
+          payload.registration.habitatUuid,
+          payload.registration.habitatId,
+          payload.registration.displayName,
+          existingBaseUrl,
+          payload.registration.apiToken,
+          payload.registration.moduleCount,
+        );
+    } else {
+      database
+        .query(
+          `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, api_token, module_count)
+           VALUES (1, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             habitat_uuid = excluded.habitat_uuid,
+             habitat_id = excluded.habitat_id,
+             display_name = excluded.display_name,
+             api_token = excluded.api_token,
+             module_count = excluded.module_count`,
+        )
+        .run(
+          payload.registration.habitatUuid,
+          payload.registration.habitatId,
+          payload.registration.displayName,
+          payload.registration.apiToken,
+          payload.registration.moduleCount,
+        );
+    }
+
+    database.query("DELETE FROM modules").run();
+    const insertModule = database.query("INSERT INTO modules (id, module_json) VALUES (?, ?)");
+    for (const module of payload.modules) {
+      insertModule.run(module.id, JSON.stringify(module));
+    }
+
+    database.query("DELETE FROM humans").run();
+    const insertHuman = database.query("INSERT INTO humans (id, human_json) VALUES (?, ?)");
+    for (const human of payload.humans) {
+      insertHuman.run(human.id, JSON.stringify(human));
+    }
+
+    database
+      .query(
+        `INSERT INTO alert_contract (id, contract_json)
+         VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           contract_json = excluded.contract_json`,
+      )
+      .run(JSON.stringify(payload.alertContract));
+
+    database.query("DELETE FROM alerts").run();
+
+    database
+      .query(
+        `INSERT INTO exploration_state (id, state_json)
+         VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           state_json = excluded.state_json`,
+      )
+      .run(JSON.stringify(createDefaultExplorationState()));
+  });
+  transaction(input);
 }
 
 export function readInventory(cwd: string): Record<string, number> {
@@ -214,6 +438,82 @@ export function writeInventory(cwd: string, inventory: Record<string, number>): 
     }
   });
   transaction(inventory);
+}
+
+export function dockExplorerState(
+  cwd: string,
+  input: {
+    deployedHumanId: string;
+    suitportModuleId: string;
+  },
+): ExplorationState {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  const transaction = database.transaction((payload: typeof input) => {
+    const explorationRow = database.query<{ state_json: string }, []>(
+      "SELECT state_json FROM exploration_state WHERE id = 1",
+    ).get();
+    const exploration = explorationRow
+      ? JSON.parse(explorationRow.state_json) as ExplorationState
+      : createDefaultExplorationState();
+
+    const inventoryRows = database.query<{ resource_type: string; quantity: number }, []>(
+      "SELECT resource_type, quantity FROM inventory ORDER BY resource_type",
+    ).all();
+    const nextInventory = Object.fromEntries(
+      inventoryRows.map((row) => [row.resource_type, row.quantity]),
+    ) as Record<string, number>;
+
+    for (const [resourceType, quantity] of Object.entries(exploration.carriedResources)) {
+      nextInventory[resourceType] = (nextInventory[resourceType] ?? 0) + quantity;
+    }
+
+    database.query("DELETE FROM inventory").run();
+    const insertInventory = database.query(
+      "INSERT INTO inventory (resource_type, quantity) VALUES (?, ?)",
+    );
+    for (const [resourceType, quantity] of Object.entries(nextInventory)) {
+      insertInventory.run(resourceType, quantity);
+    }
+
+    const humanRows = database.query<{ human_json: string }, []>(
+      "SELECT human_json FROM humans ORDER BY rowid",
+    ).all();
+    const humans = humanRows.map((row) => JSON.parse(row.human_json) as StarterHuman);
+    const nextHumans = humans.map((human) =>
+      human.id === payload.deployedHumanId
+        ? { ...human, locationModuleId: payload.suitportModuleId }
+        : human);
+    if (!nextHumans.some((human) => human.id === payload.deployedHumanId)) {
+      throw new Error(`Human "${payload.deployedHumanId}" not found.`);
+    }
+
+    database.query("DELETE FROM humans").run();
+    const insertHuman = database.query("INSERT INTO humans (id, human_json) VALUES (?, ?)");
+    for (const human of nextHumans) {
+      insertHuman.run(human.id, JSON.stringify(human));
+    }
+
+    const nextState: ExplorationState = {
+      ...exploration,
+      deployedHumanId: null,
+      x: 0,
+      y: 0,
+      carriedResources: {},
+    };
+    database
+      .query(
+        `INSERT INTO exploration_state (id, state_json)
+         VALUES (1, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           state_json = excluded.state_json`,
+      )
+      .run(JSON.stringify(nextState));
+
+    return nextState;
+  });
+
+  return transaction(input);
 }
 
 function registrationTableHasBaseUrl(database: Database): boolean {

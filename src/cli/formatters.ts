@@ -1,13 +1,16 @@
 import {
   type ActiveConstructionJob,
+  type ExplorationState,
   formatModuleListEntry,
   type ConstructionPlan,
   type LocalInventoryEntry,
   type LocalHabitatModule,
   type OfficialResource,
   type SolarIrradiance,
+  type StarterHuman,
   type StartedConstruction,
   type StoredBlueprint,
+  type HabitatAlert,
 } from "../kepler";
 import type { BackendWorldScanResponse } from "../api/backend-api";
 
@@ -166,6 +169,48 @@ export function printModuleList(modules: LocalHabitatModule[]): void {
       ];
     }),
   );
+}
+
+export function printHumanList(humans: StarterHuman[]): void {
+  if (humans.length === 0) {
+    console.log("No humans found.");
+    return;
+  }
+
+  printAlignedTable(
+    ["ID", "Display Name", "Current Module ID"],
+    humans.map((human) => [
+      human.id,
+      human.displayName,
+      human.locationModuleId,
+    ]),
+  );
+}
+
+export function printAlertList(alerts: HabitatAlert[]): void {
+  if (alerts.length === 0) {
+    console.log("No alerts found.");
+    return;
+  }
+
+  printAlignedTable(
+    ["ID", "Type", "Severity", "Status", "Occurrences", "Subject"],
+    alerts.map((alert) => [
+      alert.id,
+      alert.type,
+      alert.severity,
+      alert.status,
+      String(alert.occurrenceCount),
+      alert.subjectHumanId ?? alert.subjectModuleId ?? "(none)",
+    ]),
+  );
+}
+
+export function printEvaStatus(state: ExplorationState): void {
+  console.log(`deployedHumanId: ${state.deployedHumanId ?? "(none)"}`);
+  console.log(`position: (${state.x}, ${state.y})`);
+  console.log(`carriedResources: ${JSON.stringify(state.carriedResources)}`);
+  console.log(`maxCarryingCapacityKg: ${state.maxCarryingCapacityKg}`);
 }
 
 export function printModuleStatus(result: {

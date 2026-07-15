@@ -3,16 +3,23 @@ import path from "node:path";
 import { ApiError, createApiClient } from "../api/client";
 import {
   deleteRegistration,
+  hydrateRegistrationState,
   readInventory,
+  readExplorationState,
   readCurrentTick,
+  readHumans,
   readModules,
   readRegistration,
+  readAlertContract,
   writeInventory,
   writeModules,
   writeRegistration,
+  writeAlertContract,
+  writeHumans,
   type BackendRegistration,
   type BackendInventoryEntry,
 } from "./registration-store";
+import { assertModuleNotOccupied } from "./human-service";
 import {
   cancelConstructionJob,
   listActiveConstructionJobs,
@@ -26,16 +33,11 @@ import {
   type SolarIrradiance,
 } from "../kepler";
 import type {
+  HabitatRegistrationResponse,
   LocalHabitatModule,
   ModuleRuntimeStatus,
   StoredBlueprint,
 } from "../kepler";
-
-type KeplerRegistrationResponse = {
-  habitatId: string;
-  starterModules: Array<unknown>;
-  blueprints: StoredBlueprint[];
-};
 
 type KeplerStatusResponse = {
   habitat: {
@@ -66,8 +68,6 @@ type KeplerSolarResponse = {
 };
 
 type WorldScanInput = {
-  x: number;
-  y: number;
   sensorStrength: number;
   radiusTiles: number;
 };
@@ -96,7 +96,7 @@ export async function registerHabitat(
   displayName: string,
 ): Promise<{
   registration: BackendRegistration | null;
-  response: KeplerRegistrationResponse;
+  response: HabitatRegistrationResponse;
 }> {
   const existingRegistration = readRegistration(cwd);
   if (existingRegistration) {
@@ -110,7 +110,7 @@ export async function registerHabitat(
 
   const kepler = createKeplerClient();
   const habitatUuid = crypto.randomUUID();
-  const response = await kepler.requestJson<KeplerRegistrationResponse>("/habitats/register", {
+  const response = await kepler.requestJson<HabitatRegistrationResponse>("/habitats/register", {
     method: "POST",
     body: JSON.stringify({ displayName, habitatUuid }),
   });
@@ -123,8 +123,12 @@ export async function registerHabitat(
     moduleCount: response.starterModules.length,
   };
 
-  writeRegistration(cwd, registration);
-  writeModules(cwd, response.starterModules.map(hydrateStarterModule));
+  hydrateRegistrationState(cwd, {
+    registration,
+    alertContract: response.contracts.alerts,
+    modules: response.starterModules.map(hydrateStarterModule),
+    humans: response.starterHumans,
+  });
   writeBlueprintCatalog(cwd, Object.fromEntries(
     response.blueprints.map((blueprint) => [blueprint.blueprintId, blueprint]),
   ));
@@ -253,6 +257,7 @@ export async function deleteModule(cwd: string, moduleReference: string): Promis
   ensureRegistered(cwd);
   const modules = readModules(cwd);
   const target = resolveModuleReference(modules, moduleReference);
+  assertModuleNotOccupied(cwd, target.id);
   const index = modules.findIndex((item) => item.id === target.id);
   const [removed] = modules.splice(index, 1);
   writeModules(cwd, modules);
@@ -418,9 +423,11 @@ export async function scanWorld(
   if (!registration) {
     throw new HabitatServiceClientError("No habitat registration found.", 404);
   }
+  const exploration = readExplorationState(cwd);
+  if (!exploration.deployedHumanId) {
+    throw new HabitatServiceClientError("No human is currently deployed.", 400);
+  }
 
-  validateWorldScanInteger(input.x, "x");
-  validateWorldScanInteger(input.y, "y");
   validateWorldScanIntegerInRange(
     input.sensorStrength,
     "sensorStrength",
@@ -438,8 +445,8 @@ export async function scanWorld(
 
   const query = new URLSearchParams({
     habitatId: registration.habitatId,
-    x: String(input.x),
-    y: String(input.y),
+    x: String(exploration.x),
+    y: String(exploration.y),
     sensorStrength: String(input.sensorStrength),
     radiusTiles: String(input.radiusTiles),
   });
@@ -484,10 +491,10 @@ async function restoreKeplerRegistration(
   registration: BackendRegistration,
 ): Promise<{
   registration: BackendRegistration;
-  response: KeplerRegistrationResponse;
+  response: HabitatRegistrationResponse;
 }> {
   const kepler = createKeplerClient();
-  const response = await kepler.requestJson<KeplerRegistrationResponse>("/habitats/register", {
+  const response = await kepler.requestJson<HabitatRegistrationResponse>("/habitats/register", {
     method: "POST",
     body: JSON.stringify({
       displayName: registration.displayName,
@@ -504,6 +511,12 @@ async function restoreKeplerRegistration(
   };
 
   writeRegistration(cwd, restoredRegistration);
+  if (!readAlertContract(cwd)) {
+    writeAlertContract(cwd, response.contracts.alerts);
+  }
+  if (readHumans(cwd).length === 0) {
+    writeHumans(cwd, response.starterHumans);
+  }
   writeBlueprintCatalog(cwd, Object.fromEntries(
     response.blueprints.map((blueprint) => [blueprint.blueprintId, blueprint]),
   ));
@@ -661,12 +674,6 @@ function createBackupTimestamp(): string {
   const minutes = String(now.getMinutes()).padStart(2, "0");
   const seconds = String(now.getSeconds()).padStart(2, "0");
   return `${year}${month}${day}-${hours}${minutes}${seconds}`;
-}
-
-function validateWorldScanInteger(value: number, field: "x" | "y"): void {
-  if (!Number.isInteger(value)) {
-    throw new HabitatServiceClientError(`Invalid ${field} "${value}". Use an integer.`, 400);
-  }
 }
 
 function validateWorldScanIntegerInRange(

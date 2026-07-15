@@ -1,6 +1,6 @@
 import { createApiClient } from "./client";
-import type { ActiveConstructionJob, CanceledConstruction, ConstructionPlan, CompletedConstruction, OfficialResource, SolarIrradiance, StartedConstruction, StoredBlueprint, TickBatterySummary, SolarChargingSummary } from "../kepler";
-import type { LocalHabitatModule } from "../kepler";
+import type { ActiveConstructionJob, CanceledConstruction, ConstructionPlan, CompletedConstruction, HabitatAlert, OfficialResource, SolarIrradiance, StartedConstruction, StoredBlueprint, TickBatterySummary, SolarChargingSummary } from "../kepler";
+import type { ExplorationState, LocalHabitatModule, StarterHuman } from "../kepler";
 
 export type BackendRegistration = {
   habitatUuid: string;
@@ -62,6 +62,15 @@ export type BackendInventoryEntry = {
   quantity: number;
 };
 
+export type BackendHuman = StarterHuman;
+export type BackendAlert = HabitatAlert;
+export type BackendEvaStatus = ExplorationState;
+export type BackendCollectionResult = {
+  resourceType: string;
+  collectedKg: number;
+  remainingKg: number;
+};
+
 export type BackendTickResult = {
   startTick: number;
   endTick: number;
@@ -91,10 +100,8 @@ export type BackendWorldScanQuantityEstimate = {
 };
 
 export type BackendWorldScanInput = {
-  x: number;
-  y: number;
-  sensorStrength: number;
-  radiusTiles: number;
+  sensorStrength: number | string;
+  radiusTiles: number | string;
 };
 
 export type BackendWorldScanResponse = {
@@ -173,8 +180,6 @@ export function createBackendApiClient(config: BackendConfig) {
 
     async scanWorld(input: BackendWorldScanInput): Promise<BackendWorldScanResponse> {
       const query = new URLSearchParams({
-        x: String(input.x),
-        y: String(input.y),
         sensorStrength: String(input.sensorStrength),
         radiusTiles: String(input.radiusTiles),
       });
@@ -183,6 +188,56 @@ export function createBackendApiClient(config: BackendConfig) {
 
     async listModules(): Promise<LocalHabitatModule[]> {
       return client.requestJson("/modules", { method: "GET" });
+    },
+
+    async listHumans(): Promise<BackendHuman[]> {
+      return client.requestJson("/humans", { method: "GET" });
+    },
+
+    async listAlerts(): Promise<BackendAlert[]> {
+      return client.requestJson("/alerts", { method: "GET" });
+    },
+
+    async acknowledgeAlert(alertId: string): Promise<BackendAlert> {
+      return client.requestJson(`/alerts/${encodeURIComponent(alertId)}/acknowledge`, {
+        method: "POST",
+      });
+    },
+
+    async moveHuman(humanId: string, moduleId: string): Promise<BackendHuman> {
+      return client.requestJson(`/humans/${encodeURIComponent(humanId)}/location`, {
+        method: "PUT",
+        body: JSON.stringify({ moduleId }),
+      });
+    },
+
+    async getEvaStatus(): Promise<BackendEvaStatus> {
+      return client.requestJson("/eva", { method: "GET" });
+    },
+
+    async deployHuman(humanId: string): Promise<BackendEvaStatus> {
+      return client.requestJson("/eva/deploy", {
+        method: "POST",
+        body: JSON.stringify({ humanId }),
+      });
+    },
+
+    async moveExplorer(x: number, y: number): Promise<BackendEvaStatus> {
+      return client.requestJson("/eva/move", {
+        method: "POST",
+        body: JSON.stringify({ x, y }),
+      });
+    },
+
+    async dockExplorer(): Promise<BackendEvaStatus> {
+      return client.requestJson("/eva/dock", { method: "POST" });
+    },
+
+    async collectMaterial(quantityKg: number | string): Promise<BackendCollectionResult> {
+      return client.requestJson("/collect", {
+        method: "POST",
+        body: JSON.stringify({ quantityKg }),
+      });
     },
 
     async getModule(moduleReference: string): Promise<BackendModuleShow> {

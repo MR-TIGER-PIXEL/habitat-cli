@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { ApiError } from "../api/client";
 import { Hono } from "hono";
+import { acknowledgeAlert as acknowledgeStoredAlert, listAlerts as listStoredAlerts } from "./alert-service";
 import {
   addInventoryResource,
   advanceTicks,
@@ -65,6 +66,8 @@ export type BackendAppOptions = {
   listModules?: () => Promise<unknown>;
   listHumans?: () => Promise<unknown>;
   moveHuman?: (humanId: string, moduleId: string) => Promise<unknown>;
+  listAlerts?: () => Promise<unknown> | unknown;
+  acknowledgeAlert?: (alertId: string) => Promise<unknown> | unknown;
   getEvaStatus?: () => Promise<unknown>;
   deployHuman?: (humanId: string) => Promise<unknown>;
   moveExplorer?: (input: { x: number; y: number }) => Promise<unknown>;
@@ -106,6 +109,8 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   const readModules = options.listModules ?? (() => listModules(cwd));
   const readHumans = options.listHumans ?? (() => readStoredHumans(cwd));
   const moveHumanHandler = options.moveHuman ?? ((humanId: string, moduleId: string) => moveStoredHuman(cwd, humanId, moduleId));
+  const readAlerts = options.listAlerts ?? (() => listStoredAlerts(cwd));
+  const acknowledgeAlertHandler = options.acknowledgeAlert ?? ((alertId: string) => acknowledgeStoredAlert(cwd, alertId));
   const readEvaStatus = options.getEvaStatus ?? (() => getEvaStatus(cwd));
   const deployHumanHandler = options.deployHuman ?? ((humanId: string) => deployHuman(cwd, humanId));
   const moveExplorerHandler = options.moveExplorer ?? ((input: { x: number; y: number }) => moveExplorer(cwd, input));
@@ -254,6 +259,19 @@ export function createApp(options: BackendAppOptions = {}): Hono {
     try {
       const result = await moveHumanHandler(c.req.param("humanId"), body.moduleId);
       return c.json(result);
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
+    }
+  });
+
+  app.get("/alerts", async (c) => {
+    const alerts = (await readAlerts()) as Array<unknown>;
+    return c.json(alerts);
+  });
+
+  app.post("/alerts/:alertId/acknowledge", async (c) => {
+    try {
+      return c.json(await acknowledgeAlertHandler(c.req.param("alertId")));
     } catch (error) {
       return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
     }

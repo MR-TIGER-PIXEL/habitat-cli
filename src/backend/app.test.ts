@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { createApp } from "./app";
 import { ApiError } from "../api/client";
+import { readAlertContract, writeHumans, writeModules, writeRegistration } from "./registration-store";
 
 test("GET /registration returns null when no registration is stored", async () => {
   const app = createApp({ readRegistration: () => null });
@@ -11,6 +12,136 @@ test("GET /registration returns null when no registration is stored", async () =
   const response = await app.request("/registration");
   expect(response.status).toBe(200);
   expect(await response.json()).toEqual({ registration: null });
+});
+
+test("alert routes proxy list and acknowledge handlers", async () => {
+  const acknowledgedIds: string[] = [];
+  const app = createApp({
+    listAlerts: async () => [
+      {
+        id: "alert:eva-deployed:human-1",
+        type: "eva.deployed-outside-habitat",
+        contract: {
+          schemaVersion: "1.0",
+          schema: { type: "object" },
+        },
+        severity: "warning",
+        status: "open",
+        source: "local.eva",
+        createdAt: "2026-07-15T10:00:00.000Z",
+        lastObservedAt: "2026-07-15T10:05:00.000Z",
+        occurrenceCount: 2,
+        subjectHumanId: "human-1",
+      },
+    ],
+    acknowledgeAlert: async (alertId: string) => {
+      acknowledgedIds.push(alertId);
+      return {
+        id: alertId,
+        type: "eva.deployed-outside-habitat",
+        contract: {
+          schemaVersion: "1.0",
+          schema: { type: "object" },
+        },
+        severity: "warning",
+        status: "acknowledged",
+        source: "local.eva",
+        createdAt: "2026-07-15T10:00:00.000Z",
+        lastObservedAt: "2026-07-15T10:06:00.000Z",
+        occurrenceCount: 2,
+        subjectHumanId: "human-1",
+      };
+    },
+  });
+
+  const listed = await app.request("/alerts");
+  expect(listed.status).toBe(200);
+  expect(await listed.json()).toEqual([
+    {
+      id: "alert:eva-deployed:human-1",
+      type: "eva.deployed-outside-habitat",
+      contract: {
+        schemaVersion: "1.0",
+        schema: { type: "object" },
+      },
+      severity: "warning",
+      status: "open",
+      source: "local.eva",
+      createdAt: "2026-07-15T10:00:00.000Z",
+      lastObservedAt: "2026-07-15T10:05:00.000Z",
+      occurrenceCount: 2,
+      subjectHumanId: "human-1",
+    },
+  ]);
+
+  const acknowledged = await app.request("/alerts/alert%3Aeva-deployed%3Ahuman-1/acknowledge", {
+    method: "POST",
+  });
+  expect(acknowledged.status).toBe(200);
+  expect(await acknowledged.json()).toEqual({
+    id: "alert:eva-deployed:human-1",
+    type: "eva.deployed-outside-habitat",
+    contract: {
+      schemaVersion: "1.0",
+      schema: { type: "object" },
+    },
+    severity: "warning",
+    status: "acknowledged",
+    source: "local.eva",
+    createdAt: "2026-07-15T10:00:00.000Z",
+    lastObservedAt: "2026-07-15T10:06:00.000Z",
+    occurrenceCount: 2,
+    subjectHumanId: "human-1",
+  });
+  expect(acknowledgedIds).toEqual(["alert:eva-deployed:human-1"]);
+});
+
+test("POST /eva/deploy keeps the deployed state when a legacy registration has no local alert contract and no alert is created", async () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-alert-backfill-"));
+
+  writeRegistration(cwd, {
+    habitatUuid: "uuid-legacy-1",
+    habitatId: "habitat-legacy-1",
+    displayName: "Legacy Habitat",
+    apiToken: "local-token",
+    moduleCount: 1,
+  });
+  writeModules(cwd, [
+    {
+      id: "module-suitport-1",
+      blueprintId: "basic-suitport",
+      displayName: "Basic Suitport",
+      connectedTo: [],
+      runtimeAttributes: { status: "active", crewCapacity: 1 },
+      capabilities: ["limited-eva", "suitport-access"],
+      source: "registration",
+    },
+  ]);
+  writeHumans(cwd, [
+    {
+      id: "human-1",
+      displayName: "Crew Member 1",
+      locationModuleId: "module-suitport-1",
+    },
+  ]);
+
+  try {
+    const app = createApp({ cwd });
+
+    const deployed = await app.request("/eva/deploy", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ humanId: "human-1" }),
+    });
+    expect(deployed.status).toBe(200);
+    expect(readAlertContract(cwd)).toBeNull();
+
+    const alerts = await app.request("/alerts");
+    expect(alerts.status).toBe(200);
+    expect(await alerts.json()).toEqual([]);
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
 });
 
 test("GET /registration returns the stored registration as json", async () => {

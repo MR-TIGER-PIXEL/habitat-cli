@@ -10,8 +10,8 @@ Inspect the Kepler solar-irradiance endpoint on every wake, classify the latest 
 2. Read `solarIrradiance.wPerM2` from the JSON response.
 3. Read `solarIrradiance.condition` from the JSON response.
 4. Compare the new reading against the 450 W/m2 threshold.
-5. Check whether there is already an open low-sunlight incident in [incidents.md](/Users/amychang/Desktop/labs/habitat-cli/incidents.md).
-6. Check the most recent entry in [observations.md](/Users/amychang/Desktop/labs/habitat-cli/observations.md).
+5. Check whether there is already an open low-sunlight incident in `incidents.md`.
+6. Check the most recent entry in `observations.md`.
 
 ## Classification Rules
 
@@ -21,9 +21,9 @@ Inspect the Kepler solar-irradiance endpoint on every wake, classify the latest 
 
 ## Recording Rules
 
-- Append one observation every run to [observations.md](/Users/amychang/Desktop/labs/habitat-cli/observations.md).
+- Append one observation every run to `observations.md`.
 - Every observation must include: timestamp, `wPerM2`, condition, classification, and a short note.
-- Use [incidents.md](/Users/amychang/Desktop/labs/habitat-cli/incidents.md) for one incident per low-sunlight episode.
+- Use `incidents.md` for one incident per low-sunlight episode.
 - Create an incident when the reading first crosses below 450.
 - While sunlight remains below 450, update the same incident instead of creating duplicates.
 - Do not create duplicate incidents while sunlight remains low.

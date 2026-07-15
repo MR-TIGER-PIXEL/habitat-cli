@@ -31,6 +31,24 @@ test("resolveBackendApiBaseUrl defaults to the local Habitat API even when .env 
   }
 });
 
+test("resolveBackendApiBaseUrl ignores Bun auto-loaded .env values for HABITAT_API_BASE_URL", () => {
+  const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-api-config-"));
+
+  try {
+    const envValue = "http://100.104.87.118:8787";
+    writeFileSync(
+      path.join(cwd, ".env"),
+      `HABITAT_API_BASE_URL=${envValue}\n`,
+    );
+
+    process.env.HABITAT_API_BASE_URL = envValue;
+
+    expect(resolveBackendApiBaseUrl(cwd)).toBe("http://localhost:8787");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
 test("resolveBackendApiBaseUrl still allows an explicit shell override", () => {
   const cwd = mkdtempSync(path.join(os.tmpdir(), "habitat-api-config-"));
 

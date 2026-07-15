@@ -27,7 +27,7 @@ Compare the new classification with the most recent observation to determine whe
 
 ### Record
 
-Append one entry to [observations.md](/Users/amychang/Desktop/labs/habitat-cli/observations.md) every run. Each entry includes:
+Append one entry to `observations.md` every run. Each entry includes:
 
 - timestamp
 - `wPerM2`
@@ -35,7 +35,7 @@ Append one entry to [observations.md](/Users/amychang/Desktop/labs/habitat-cli/o
 - classification
 - short note
 
-Maintain [incidents.md](/Users/amychang/Desktop/labs/habitat-cli/incidents.md) as one incident per low-sunlight episode:
+Maintain `incidents.md` as one incident per low-sunlight episode:
 
 - create the incident on the first drop below 450
 - keep updating that same incident while sunlight remains low
@@ -54,6 +54,6 @@ Use the final-response contract:
 
 ## Files
 
-- [ORDERS.md](/Users/amychang/Desktop/labs/habitat-cli/ORDERS.md): inspection instructions and response rules
-- [observations.md](/Users/amychang/Desktop/labs/habitat-cli/observations.md): append-only observation log
-- [incidents.md](/Users/amychang/Desktop/labs/habitat-cli/incidents.md): one incident per low-sunlight episode
+- `ORDERS.md`: inspection instructions and response rules
+- `observations.md`: append-only observation log
+- `incidents.md`: one incident per low-sunlight episode

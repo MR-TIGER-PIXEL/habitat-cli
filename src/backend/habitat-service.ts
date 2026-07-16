@@ -2,6 +2,8 @@ import { copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { ApiError, createApiClient } from "../api/client";
 import {
+  readClockState,
+  writeClockState,
   deleteRegistration,
   hydrateRegistrationState,
   persistTickStateSnapshot,
@@ -21,6 +23,9 @@ import {
   type BackendRegistration,
   type BackendInventoryEntry,
 } from "./registration-store";
+import { sharedClockEventBroker } from "./clock-events";
+import { sharedClockStreamController, type ClockStreamController } from "./clock-stream-controller";
+import { enqueueSerializedTickWork } from "./tick-queue";
 import { assertModuleNotOccupied } from "./human-service";
 import { applyAlertObservation } from "./alert-service";
 import {
@@ -107,12 +112,7 @@ export async function registerHabitat(
 }> {
   const existingRegistration = readRegistration(cwd);
   if (existingRegistration) {
-    const status = await readExistingKeplerRegistration(existingRegistration);
-    if (status === "active") {
-      throw new Error("Habitat is already registered.");
-    }
-
-    return restoreKeplerRegistration(cwd, existingRegistration);
+    return resolveExistingRegistration(cwd, existingRegistration);
   }
 
   const kepler = createKeplerClient();
@@ -126,7 +126,9 @@ export async function registerHabitat(
     habitatUuid,
     habitatId: response.habitatId,
     displayName,
-    apiToken: crypto.randomUUID(),
+    apiToken: response.apiToken,
+    streamUrl: response.streamUrl,
+    stream: response.stream,
     moduleCount: response.starterModules.length,
   };
 
@@ -144,6 +146,25 @@ export async function registerHabitat(
     registration,
     response,
   };
+}
+
+async function resolveExistingRegistration(
+  cwd: string,
+  existingRegistration: BackendRegistration,
+): Promise<{
+  registration: BackendRegistration | null;
+  response: HabitatRegistrationResponse;
+}> {
+  if (registrationNeedsStreamUpgrade(existingRegistration)) {
+    return restoreKeplerRegistration(cwd, existingRegistration);
+  }
+
+  const status = await readExistingKeplerRegistration(existingRegistration);
+  if (status === "active") {
+    throw new Error("Habitat is already registered.");
+  }
+
+  return restoreKeplerRegistration(cwd, existingRegistration);
 }
 
 export async function getStatus(cwd: string): Promise<{
@@ -171,6 +192,124 @@ export async function getStatus(cwd: string): Promise<{
     moduleCount: readModules(cwd).length,
     currentTick: readCurrentTick(cwd),
   };
+}
+
+export async function getClockStatus(cwd: string): Promise<{
+  mode: "manual" | "kepler";
+  listening: boolean;
+  manualTicksAllowed: boolean;
+  connectionState: "connected" | "connecting" | "disconnected" | "error";
+  latestAbsoluteKeplerTick: number | null;
+  latestAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
+}> {
+  const clock = readClockState(cwd);
+  const listening = clock.mode === "kepler";
+
+  return {
+    mode: clock.mode,
+    listening,
+    manualTicksAllowed: clock.mode === "manual",
+    connectionState: clock.connectionState,
+    latestAbsoluteKeplerTick: clock.latestAbsoluteKeplerTick,
+    latestAdvancedBy: clock.latestAdvancedBy,
+    lastConnectedAt: clock.lastConnectedAt,
+    lastMessageAt: clock.lastMessageAt,
+    lastErrorAt: clock.lastErrorAt,
+    lastErrorMessage: clock.lastErrorMessage,
+  };
+}
+
+export async function listenClockOn(
+  cwd: string,
+  controller: ClockStreamController = sharedClockStreamController,
+): Promise<{
+  mode: "manual" | "kepler";
+  listening: boolean;
+  manualTicksAllowed: boolean;
+  connectionState: "connected" | "connecting" | "disconnected" | "error";
+  latestAbsoluteKeplerTick: number | null;
+  latestAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
+}> {
+  const registration = requireUsableClockRegistration(cwd);
+  return startClockController(cwd, registration, controller, { modeOnFailure: "kepler" });
+}
+
+export async function listenClockOff(
+  cwd: string,
+  controller: ClockStreamController = sharedClockStreamController,
+): Promise<{
+  mode: "manual" | "kepler";
+  listening: boolean;
+  manualTicksAllowed: boolean;
+  connectionState: "connected" | "connecting" | "disconnected" | "error";
+  latestAbsoluteKeplerTick: number | null;
+  latestAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
+}> {
+  await controller.stop();
+  const current = readClockState(cwd);
+  writeClockState(cwd, {
+    ...current,
+    mode: "manual",
+    connectionState: "disconnected",
+    lastDisconnectedAt: new Date().toISOString(),
+  });
+  return getClockStatus(cwd);
+}
+
+export async function initializeClockRuntime(
+  cwd: string,
+  controller: ClockStreamController = sharedClockStreamController,
+): Promise<{
+  mode: "manual" | "kepler";
+  listening: boolean;
+  manualTicksAllowed: boolean;
+  connectionState: "connected" | "connecting" | "disconnected" | "error";
+  latestAbsoluteKeplerTick: number | null;
+  latestAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
+}> {
+  try {
+    const registration = requireUsableClockRegistration(cwd);
+    return startClockController(cwd, registration, controller, { modeOnFailure: "kepler" });
+  } catch (error) {
+    const current = readClockState(cwd);
+    writeClockState(cwd, {
+      ...current,
+      mode: "kepler",
+      connectionState: "error",
+      lastErrorAt: new Date().toISOString(),
+      lastErrorMessage: redactClockError(error),
+    });
+    return getClockStatus(cwd);
+  }
+}
+
+export async function shutdownClockRuntime(
+  cwd: string,
+  controller: ClockStreamController = sharedClockStreamController,
+): Promise<void> {
+  await controller.stop();
+  const current = readClockState(cwd);
+  writeClockState(cwd, {
+    ...current,
+    connectionState: "disconnected",
+    lastDisconnectedAt: new Date().toISOString(),
+  });
 }
 
 export async function unregisterHabitat(cwd: string): Promise<BackendRegistration> {
@@ -318,6 +457,22 @@ export async function getModulePowerStatus(cwd: string): Promise<{
 }
 
 export async function advanceTicks(cwd: string, count: number): Promise<Omit<PowerTickResult, "modules">> {
+  return enqueueSerializedTickWork(cwd, async () => {
+    if (readClockState(cwd).mode === "kepler") {
+      throw new Error("Manual ticks are unavailable while Kepler listening is enabled. Run habitat clock listen off to return to manual mode.");
+    }
+
+    return applySimulationTicks(cwd, count);
+  });
+}
+
+async function applySimulationTicks(
+  cwd: string,
+  count: number,
+  options?: {
+    clockState?: ReturnType<typeof readClockState>;
+  },
+): Promise<Omit<PowerTickResult, "modules">> {
   ensureRegistered(cwd);
   const solar = await getSolarIrradiance();
   const simulated = simulatePowerTicks(readModules(cwd), readCurrentTick(cwd), count, solar as SolarIrradiance);
@@ -335,6 +490,7 @@ export async function advanceTicks(cwd: string, count: number): Promise<Omit<Pow
     modules,
     exploration,
     alerts,
+    clockState: options?.clockState,
   });
 }
 
@@ -605,6 +761,9 @@ async function restoreKeplerRegistration(
   const restoredRegistration: BackendRegistration = {
     ...registration,
     habitatId: response.habitatId,
+    apiToken: response.apiToken,
+    streamUrl: response.streamUrl,
+    stream: response.stream,
     moduleCount: readModules(cwd).length,
   };
 
@@ -627,6 +786,161 @@ async function restoreKeplerRegistration(
 
 export function isUpstreamApiError(error: unknown): error is ApiError {
   return error instanceof ApiError;
+}
+
+function registrationNeedsStreamUpgrade(registration: BackendRegistration): boolean {
+  return !registration.apiToken.trim() || !registration.streamUrl || !registration.stream;
+}
+
+function requireUsableClockRegistration(cwd: string): BackendRegistration & {
+  streamUrl: string;
+  stream: NonNullable<BackendRegistration["stream"]>;
+} {
+  const registration = readRegistration(cwd);
+  if (!registration) {
+    throw new Error("No habitat registration found.");
+  }
+  if (!registration.streamUrl?.trim() || !registration.apiToken.trim() || !registration.stream) {
+    throw new Error("Missing saved Kepler stream credentials. Re-register once valid stream credentials are available.");
+  }
+  if (!registration.stream.subscriptions.includes("ticks")) {
+    throw new Error("Saved stream metadata does not advertise tick subscription support.");
+  }
+  return registration as BackendRegistration & {
+    streamUrl: string;
+    stream: NonNullable<BackendRegistration["stream"]>;
+  };
+}
+
+function startClockController(
+  cwd: string,
+  registration: BackendRegistration & {
+    streamUrl: string;
+    stream: NonNullable<BackendRegistration["stream"]>;
+  },
+  controller: ClockStreamController,
+  options: {
+    modeOnFailure: "manual" | "kepler";
+  },
+): Promise<{
+  mode: "manual" | "kepler";
+  listening: boolean;
+  manualTicksAllowed: boolean;
+  connectionState: "connected" | "connecting" | "disconnected" | "error";
+  latestAbsoluteKeplerTick: number | null;
+  latestAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
+}> {
+  const previous = readClockState(cwd);
+  if (controller.isStarted()) {
+    return getClockStatus(cwd);
+  }
+  writeClockState(cwd, {
+    ...previous,
+    mode: "kepler",
+    connectionState: "connecting",
+    lastErrorAt: null,
+    lastErrorMessage: null,
+  });
+
+  try {
+    controller.start({
+      registration: {
+        habitatId: registration.habitatId,
+        apiToken: registration.apiToken,
+        streamUrl: registration.streamUrl,
+        stream: registration.stream,
+      },
+      onAcknowledged() {
+        const current = readClockState(cwd);
+        writeClockState(cwd, {
+          ...current,
+          mode: "kepler",
+          connectionState: "connected",
+          lastConnectedAt: new Date().toISOString(),
+          lastErrorAt: null,
+          lastErrorMessage: null,
+        });
+      },
+      onUnexpectedDisconnect() {
+        const current = readClockState(cwd);
+        writeClockState(cwd, {
+          ...current,
+          mode: "kepler",
+          connectionState: "disconnected",
+          lastDisconnectedAt: new Date().toISOString(),
+        });
+      },
+      async onPlanetTick(notice) {
+        await enqueueSerializedTickWork(cwd, async () => {
+          const clock = readClockState(cwd);
+          if (clock.mode !== "kepler") {
+            sharedClockEventBroker.publish({
+              previousTick: notice.previousTick,
+              tick: notice.tick,
+              advancedBy: notice.advancedBy,
+              issuedAt: notice.issuedAt ?? new Date().toISOString(),
+              applied: false,
+            });
+            return;
+          }
+
+          if (clock.latestAbsoluteKeplerTick !== null && notice.tick <= clock.latestAbsoluteKeplerTick) {
+            writeClockState(cwd, {
+              ...clock,
+              mode: "kepler",
+              latestAdvancedBy: notice.advancedBy,
+              lastMessageAt: new Date().toISOString(),
+            });
+            sharedClockEventBroker.publish({
+              previousTick: notice.previousTick,
+              tick: notice.tick,
+              advancedBy: notice.advancedBy,
+              issuedAt: notice.issuedAt ?? new Date().toISOString(),
+              applied: false,
+            });
+            return;
+          }
+
+          await applySimulationTicks(cwd, notice.advancedBy, {
+            clockState: {
+              ...clock,
+              mode: "kepler",
+              latestAbsoluteKeplerTick: notice.tick,
+              latestAdvancedBy: notice.advancedBy,
+              lastMessageAt: new Date().toISOString(),
+            },
+          });
+          sharedClockEventBroker.publish({
+            previousTick: notice.previousTick,
+            tick: notice.tick,
+            advancedBy: notice.advancedBy,
+            issuedAt: notice.issuedAt ?? new Date().toISOString(),
+            applied: true,
+          });
+        });
+      },
+    });
+  } catch (error) {
+    const current = readClockState(cwd);
+    writeClockState(cwd, {
+      ...current,
+      mode: options.modeOnFailure,
+      connectionState: "error",
+      lastErrorAt: new Date().toISOString(),
+      lastErrorMessage: redactClockError(error),
+    });
+  }
+
+  return getClockStatus(cwd);
+}
+
+function redactClockError(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.replace(/token/gi, "credential");
 }
 
 function hydrateStarterModule(module: unknown): LocalHabitatModule {

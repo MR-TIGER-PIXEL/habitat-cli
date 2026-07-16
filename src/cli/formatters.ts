@@ -13,6 +13,7 @@ import {
   type HabitatAlert,
 } from "../kepler";
 import type { BackendWorldScanResponse } from "../api/backend-api";
+import type { BackendClockEvent } from "../api/backend-api";
 import { estimateEvaTicksRemaining } from "../backend/eva-state";
 
 function printAlignedTable(headers: string[], rows: string[][]): void {
@@ -81,6 +82,16 @@ export function printRegistrationStatus(result: {
     displayName: string;
     habitatId: string;
     habitatUuid: string;
+    apiToken: string;
+    streamUrl: string | null;
+    stream: {
+      protocolVersion: string;
+      subscriptions: string[];
+      currentTick: number;
+      tickIntervalMs?: number;
+      ticksPerPulse: number;
+      status: string;
+    } | null;
     moduleCount: number;
   };
   habitat: {
@@ -96,11 +107,54 @@ export function printRegistrationStatus(result: {
   console.log(`habitatId: ${result.registration.habitatId}`);
   console.log(`habitatUuid: ${result.registration.habitatUuid}`);
   console.log(`moduleCount: ${result.moduleCount}`);
+  console.log(`streamUrl: ${result.registration.streamUrl ?? "(unset)"}`);
+  console.log(`apiToken: ${result.registration.apiToken}`);
+  console.log(`streamSubscriptions: ${result.registration.stream?.subscriptions.join(", ") ?? "(none)"}`);
+  console.log(`streamProtocolVersion: ${result.registration.stream?.protocolVersion ?? "(unset)"}`);
+  console.log(`streamCurrentTick: ${result.registration.stream?.currentTick ?? "(unset)"}`);
+  if (typeof result.registration.stream?.tickIntervalMs === "number") {
+    console.log(`streamTickIntervalMs: ${result.registration.stream.tickIntervalMs}`);
+  }
+  console.log(`streamTicksPerPulse: ${result.registration.stream?.ticksPerPulse ?? "(unset)"}`);
+  console.log(`streamStatus: ${result.registration.stream?.status ?? "(unset)"}`);
   console.log(`currentTick: ${result.currentTick}`);
   console.log(`habitatSlug: ${result.habitat.habitatSlug}`);
   console.log(`status: ${result.habitat.status}`);
   console.log(`catalogVersion: ${result.habitat.catalogVersion}`);
   console.log(`lastSeenAt: ${result.habitat.lastSeenAt ?? "(never)"}`);
+}
+
+export function printClockStatus(result: {
+  clock: {
+    mode: "manual" | "kepler";
+    listening: boolean;
+    manualTicksAllowed: boolean;
+    connectionState: "connected" | "connecting" | "disconnected" | "error";
+    latestAbsoluteKeplerTick: number | null;
+    latestAdvancedBy: number | null;
+    lastConnectedAt: string | null;
+    lastMessageAt: string | null;
+    lastErrorAt: string | null;
+    lastErrorMessage: string | null;
+  };
+}): void {
+  console.log(`mode: ${result.clock.mode}`);
+  console.log(`listening: ${result.clock.listening ? "on" : "off"}`);
+  console.log(`manualTicksAllowed: ${result.clock.manualTicksAllowed ? "yes" : "no"}`);
+  console.log(`connection: ${result.clock.connectionState}`);
+  console.log(`latestAbsoluteKeplerTick: ${result.clock.latestAbsoluteKeplerTick ?? "(unset)"}`);
+  console.log(`latestAdvancedBy: ${result.clock.latestAdvancedBy ?? "(unset)"}`);
+  console.log(`lastConnectedAt: ${result.clock.lastConnectedAt ?? "(never)"}`);
+  console.log(`lastMessageAt: ${result.clock.lastMessageAt ?? "(never)"}`);
+  console.log(`lastErrorAt: ${result.clock.lastErrorAt ?? "(never)"}`);
+  console.log(`lastErrorMessage: ${result.clock.lastErrorMessage ?? "(none)"}`);
+}
+
+export function printClockEvent(event: BackendClockEvent): void {
+  const previousTick = event.previousTick ?? "(unset)";
+  console.log(
+    `tick=${event.tick} advancedBy=${event.advancedBy} issuedAt=${event.issuedAt} applied=${event.applied ? "yes" : "no"} previousTick=${previousTick}`,
+  );
 }
 
 export function printTickResult(result: {

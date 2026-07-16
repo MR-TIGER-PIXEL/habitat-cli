@@ -147,9 +147,9 @@ export type HabitatRegistrationStream = {
   protocolVersion: string;
   subscriptions: string[];
   currentTick: number;
-  tickIntervalMs: number;
+  tickIntervalMs?: number;
   ticksPerPulse: number;
-  status: "paused" | "running";
+  status: string;
 };
 
 export type HabitatRegistrationResponse = {

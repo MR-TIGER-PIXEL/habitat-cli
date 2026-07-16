@@ -2,11 +2,15 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { ApiError } from "../api/client";
 import { Hono } from "hono";
+import { sharedClockEventBroker, type ClockEventBroker, type ClockTickEvent } from "./clock-events";
 import { acknowledgeAlert as acknowledgeStoredAlert, listAlerts as listStoredAlerts } from "./alert-service";
 import {
   addInventoryResource,
   advanceTicks,
   cancelConstructionForHabitat,
+  getClockStatus,
+  listenClockOff,
+  listenClockOn,
   getOfficialBlueprint,
   getSolarIrradiance,
   getRegistration,
@@ -46,6 +50,19 @@ type StatusResult = {
   moduleCount: number;
   currentTick: number;
 };
+type ClockStatusResult = {
+  mode: "manual" | "kepler";
+  listening: boolean;
+  manualTicksAllowed: boolean;
+  connectionState: "connected" | "connecting" | "disconnected" | "error";
+  latestAbsoluteKeplerTick: number | null;
+  latestAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
+};
+type ClockEventsSubscriber = (listener: (event: ClockTickEvent) => void) => () => void;
 
 export type BackendAppOptions = {
   cwd?: string;
@@ -54,6 +71,10 @@ export type BackendAppOptions = {
   getRegistration?: () => Promise<BackendRegistration | null> | BackendRegistration | null;
   registerHabitat?: (displayName: string) => Promise<unknown>;
   getStatus?: () => Promise<unknown>;
+  getClockStatus?: () => Promise<unknown>;
+  listenClockOn?: () => Promise<unknown>;
+  listenClockOff?: () => Promise<unknown>;
+  subscribeClockEvents?: ClockEventsSubscriber;
   unregisterHabitat?: () => Promise<unknown>;
   listOfficialBlueprints?: () => Promise<unknown>;
   getOfficialBlueprint?: (blueprintId: string) => Promise<unknown>;
@@ -97,6 +118,10 @@ export function createApp(options: BackendAppOptions = {}): Hono {
     options.readRegistration ?? options.getRegistration ?? (() => getRegistration(cwd));
   const register = options.registerHabitat ?? ((displayName: string) => registerHabitat(cwd, displayName));
   const readStatus = options.getStatus ?? (() => getStatus(cwd));
+  const readClockStatus = options.getClockStatus ?? (() => getClockStatus(cwd));
+  const listenOn = options.listenClockOn ?? (() => listenClockOn(cwd));
+  const listenOff = options.listenClockOff ?? (() => listenClockOff(cwd));
+  const subscribeClockEvents = options.subscribeClockEvents ?? ((listener) => sharedClockEventBroker.subscribe(listener));
   const unregister = options.unregisterHabitat ?? (() => unregisterHabitat(cwd));
   const readBlueprints = options.listOfficialBlueprints ?? (() => listOfficialBlueprints());
   const readBlueprint = options.getOfficialBlueprint ?? ((blueprintId: string) => getOfficialBlueprint(blueprintId));
@@ -153,10 +178,68 @@ export function createApp(options: BackendAppOptions = {}): Hono {
   app.get("/status", async (c) => {
     try {
       const result = (await readStatus()) as StatusResult;
-      return c.json({ ...result, registration: toPublicRegistration(result.registration) });
+      return c.json(result);
     } catch (error) {
       return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
     }
+  });
+
+  app.get("/clock/status", async (c) => {
+    try {
+      const result = (await readClockStatus()) as ClockStatusResult;
+      return c.json({ clock: result });
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 404);
+    }
+  });
+
+  app.post("/clock/listen/on", async (c) => {
+    try {
+      const result = await listenOn();
+      return c.json({ clock: result });
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+    }
+  });
+
+  app.post("/clock/listen/off", async (c) => {
+    try {
+      const result = await listenOff();
+      return c.json({ clock: result });
+    } catch (error) {
+      return c.json({ error: { message: error instanceof Error ? error.message : String(error) } }, 400);
+    }
+  });
+
+  app.get("/clock/events", async (c) => {
+    let unsubscribe: (() => void) | null = null;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        unsubscribe = subscribeClockEvents((event) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
+        });
+
+        c.req.raw.signal.addEventListener("abort", () => {
+          unsubscribe?.();
+          unsubscribe = null;
+          controller.close();
+        }, { once: true });
+      },
+      cancel() {
+        unsubscribe?.();
+        unsubscribe = null;
+        return;
+      },
+    });
+
+    return new Response(stream, {
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+        "connection": "keep-alive",
+      },
+    });
   });
 
   app.delete("/registration", async (c) => {

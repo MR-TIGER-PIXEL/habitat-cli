@@ -26,6 +26,8 @@ function seedRegisteredEvaState(cwd: string) {
     habitatId: "habitat-1",
     displayName: "Artemis Ridge",
     apiToken: "local-token",
+    streamUrl: null,
+    stream: null,
     moduleCount: 2,
   });
   writeAlertContract(cwd, {

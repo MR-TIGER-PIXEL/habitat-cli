@@ -5,6 +5,7 @@ import path from "node:path";
 import { createApp } from "./app";
 import { ApiError } from "../api/client";
 import { HabitatServiceClientError } from "./habitat-service";
+import { createClockEventBroker } from "./clock-events";
 import { readAlertContract, writeHumans, writeModules, writeRegistration } from "./registration-store";
 
 test("GET /registration returns null when no registration is stored", async () => {
@@ -105,6 +106,8 @@ test("POST /eva/deploy keeps the deployed state when a legacy registration has n
     habitatId: "habitat-legacy-1",
     displayName: "Legacy Habitat",
     apiToken: "local-token",
+    streamUrl: null,
+    stream: null,
     moduleCount: 1,
   });
   writeModules(cwd, [
@@ -152,6 +155,14 @@ test("GET /registration returns the stored registration as json", async () => {
       habitatId: "habitat-123",
       displayName: "Starlight Forge",
       apiToken: "token-abc",
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      stream: {
+        protocolVersion: "1.0",
+        subscriptions: ["ticks"],
+        currentTick: 0,
+        ticksPerPulse: 1,
+        status: "paused",
+      },
       moduleCount: 2,
     }),
   });
@@ -163,6 +174,14 @@ test("GET /registration returns the stored registration as json", async () => {
       habitatUuid: "uuid-123",
       habitatId: "habitat-123",
       displayName: "Starlight Forge",
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      stream: {
+        protocolVersion: "1.0",
+        subscriptions: ["ticks"],
+        currentTick: 0,
+        ticksPerPulse: 1,
+        status: "paused",
+      },
       moduleCount: 2,
     },
   });
@@ -181,6 +200,14 @@ test("public registration responses and backend logs never expose API tokens", a
         habitatId: "habitat-secure",
         displayName: "Secure Habitat",
         apiToken: storedToken,
+        streamUrl: "wss://planet.turingguild.com/planet/stream",
+        stream: {
+          protocolVersion: "1.0",
+          subscriptions: ["ticks"],
+          currentTick: 0,
+          ticksPerPulse: 1,
+          status: "paused",
+        },
         moduleCount: 1,
       }),
       getStatus: async () => ({
@@ -189,24 +216,48 @@ test("public registration responses and backend logs never expose API tokens", a
           habitatId: "habitat-secure",
           displayName: "Secure Habitat",
           apiToken: storedToken,
+          streamUrl: "wss://planet.turingguild.com/planet/stream",
+          stream: {
+            protocolVersion: "1.0",
+            subscriptions: ["ticks"],
+            currentTick: 0,
+            ticksPerPulse: 1,
+            status: "paused",
+          },
           moduleCount: 1,
         },
         habitat: { status: "online" },
         moduleCount: 1,
         currentTick: 0,
       }),
+      getClockStatus: async () => ({
+        mode: "manual",
+        listening: false,
+        manualTicksAllowed: true,
+        connectionState: "disconnected",
+        latestAbsoluteKeplerTick: null,
+        latestAdvancedBy: null,
+        lastConnectedAt: null,
+        lastMessageAt: null,
+        lastErrorAt: null,
+        lastErrorMessage: null,
+      }),
     });
 
     const registration = await app.request("/registration");
     const status = await app.request("/status");
+    const clockStatus = await app.request("/clock/status");
     const registrationText = await registration.text();
     const statusText = await status.text();
+    const clockStatusText = await clockStatus.text();
     const logText = logs.join("\n");
 
     expect(registrationText).not.toContain("apiToken");
     expect(registrationText).not.toContain(storedToken);
-    expect(statusText).not.toContain("apiToken");
-    expect(statusText).not.toContain(storedToken);
+    expect(statusText).toContain("apiToken");
+    expect(statusText).toContain(storedToken);
+    expect(clockStatusText).not.toContain("apiToken");
+    expect(clockStatusText).not.toContain(storedToken);
     expect(logText).not.toContain("apiToken");
     expect(logText).not.toContain("Bearer");
     expect(logText).not.toContain(storedToken);
@@ -223,6 +274,14 @@ test("POST /registration and DELETE /registration use backend handlers", async (
         habitatId: "habitat-456",
         displayName,
         apiToken: "token-def",
+        streamUrl: "wss://planet.turingguild.com/planet/stream",
+        stream: {
+          protocolVersion: "1.0",
+          subscriptions: ["ticks"],
+          currentTick: 0,
+          ticksPerPulse: 1,
+          status: "paused",
+        },
         moduleCount: 6,
       },
       response: {},
@@ -233,6 +292,15 @@ test("POST /registration and DELETE /registration use backend handlers", async (
         habitatId: "habitat-456",
         displayName: "Artemis Ridge",
         apiToken: "token-def",
+        streamUrl: "wss://planet.turingguild.com/planet/stream",
+        stream: {
+          protocolVersion: "1.0",
+          subscriptions: ["ticks", "alerts"],
+          currentTick: 25,
+          tickIntervalMs: 1000,
+          ticksPerPulse: 1,
+          status: "running",
+        },
         moduleCount: 6,
       },
       habitat: {
@@ -264,6 +332,14 @@ test("POST /registration and DELETE /registration use backend handlers", async (
       habitatUuid: "uuid-456",
       habitatId: "habitat-456",
       displayName: "Artemis Ridge",
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      stream: {
+        protocolVersion: "1.0",
+        subscriptions: ["ticks"],
+        currentTick: 0,
+        ticksPerPulse: 1,
+        status: "paused",
+      },
       moduleCount: 6,
     },
     response: {},
@@ -276,6 +352,16 @@ test("POST /registration and DELETE /registration use backend handlers", async (
       habitatUuid: "uuid-456",
       habitatId: "habitat-456",
       displayName: "Artemis Ridge",
+      apiToken: "token-def",
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      stream: {
+        protocolVersion: "1.0",
+        subscriptions: ["ticks", "alerts"],
+        currentTick: 25,
+        tickIntervalMs: 1000,
+        ticksPerPulse: 1,
+        status: "running",
+      },
       moduleCount: 6,
     },
     habitat: {
@@ -298,6 +384,192 @@ test("POST /registration and DELETE /registration use backend handlers", async (
       moduleCount: 6,
     },
   });
+});
+
+test("GET /clock/status returns the default persisted clock status shape", async () => {
+  const app = createApp({
+    getClockStatus: async () => ({
+      mode: "manual",
+      listening: false,
+      manualTicksAllowed: true,
+      connectionState: "disconnected",
+      latestAbsoluteKeplerTick: null,
+      latestAdvancedBy: null,
+      lastConnectedAt: null,
+      lastMessageAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    }),
+  });
+
+  const response = await app.request("/clock/status");
+  expect(response.status).toBe(200);
+  expect(await response.json()).toEqual({
+    clock: {
+      mode: "manual",
+      listening: false,
+      manualTicksAllowed: true,
+      connectionState: "disconnected",
+      latestAbsoluteKeplerTick: null,
+      latestAdvancedBy: null,
+      lastConnectedAt: null,
+      lastMessageAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    },
+  });
+});
+
+test("POST /clock/listen/on and POST /clock/listen/off proxy backend handlers", async () => {
+  const app = createApp({
+    listenClockOn: async () => ({
+      mode: "kepler",
+      listening: true,
+      manualTicksAllowed: false,
+      connectionState: "connecting",
+      latestAbsoluteKeplerTick: null,
+      latestAdvancedBy: null,
+      lastConnectedAt: null,
+      lastMessageAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    }),
+    listenClockOff: async () => ({
+      mode: "manual",
+      listening: false,
+      manualTicksAllowed: true,
+      connectionState: "disconnected",
+      latestAbsoluteKeplerTick: 15,
+      latestAdvancedBy: 2,
+      lastConnectedAt: "2026-07-16T15:05:00Z",
+      lastMessageAt: "2026-07-16T15:06:00Z",
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    }),
+  });
+
+  const onResponse = await app.request("/clock/listen/on", { method: "POST" });
+  expect(onResponse.status).toBe(200);
+  expect(await onResponse.json()).toEqual({
+    clock: {
+      mode: "kepler",
+      listening: true,
+      manualTicksAllowed: false,
+      connectionState: "connecting",
+      latestAbsoluteKeplerTick: null,
+      latestAdvancedBy: null,
+      lastConnectedAt: null,
+      lastMessageAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    },
+  });
+
+  const offResponse = await app.request("/clock/listen/off", { method: "POST" });
+  expect(offResponse.status).toBe(200);
+  expect(await offResponse.json()).toEqual({
+    clock: {
+      mode: "manual",
+      listening: false,
+      manualTicksAllowed: true,
+      connectionState: "disconnected",
+      latestAbsoluteKeplerTick: 15,
+      latestAdvancedBy: 2,
+      lastConnectedAt: "2026-07-16T15:05:00Z",
+      lastMessageAt: "2026-07-16T15:06:00Z",
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    },
+  });
+});
+
+test("GET /clock/events emits only future events and does not replay earlier ones", async () => {
+  const broker = createClockEventBroker();
+  broker.publish({
+    tick: 9,
+    advancedBy: 1,
+    issuedAt: "2026-07-16T15:00:00Z",
+    applied: true,
+    previousTick: 8,
+  });
+
+  const app = createApp({
+    subscribeClockEvents: (listener) => broker.subscribe(listener),
+  });
+
+  const response = await app.request("/clock/events");
+  const reader = response.body?.getReader();
+  expect(reader).toBeDefined();
+
+  broker.publish({
+    tick: 10,
+    advancedBy: 2,
+    issuedAt: "2026-07-16T15:05:00Z",
+    applied: true,
+    previousTick: 8,
+  });
+
+  const chunk = await reader?.read();
+  const text = new TextDecoder().decode(chunk?.value);
+
+  expect(text).toContain('"tick":10');
+  expect(text).not.toContain('"tick":9');
+  await reader?.cancel();
+});
+
+test("GET /clock/events supports multiple subscribers and disconnecting one does not affect others", async () => {
+  const broker = createClockEventBroker();
+  const app = createApp({
+    subscribeClockEvents: (listener) => broker.subscribe(listener),
+  });
+
+  const responseA = await app.request("/clock/events");
+  const responseB = await app.request("/clock/events");
+  const readerA = responseA.body?.getReader();
+  const readerB = responseB.body?.getReader();
+
+  await readerA?.cancel();
+  expect(broker.subscriberCount()).toBe(1);
+
+  broker.publish({
+    tick: 11,
+    advancedBy: 3,
+    issuedAt: "2026-07-16T15:06:00Z",
+    applied: false,
+    previousTick: 8,
+  });
+
+  const chunk = await readerB?.read();
+  const text = new TextDecoder().decode(chunk?.value);
+
+  expect(text).toContain('"tick":11');
+  expect(text).toContain('"advancedBy":3');
+  await readerB?.cancel();
+});
+
+test("GET /clock/events SSE payloads never contain the API token", async () => {
+  const broker = createClockEventBroker();
+  const app = createApp({
+    subscribeClockEvents: (listener) => broker.subscribe(listener),
+  });
+
+  const response = await app.request("/clock/events");
+  const reader = response.body?.getReader();
+
+  broker.publish({
+    tick: 12,
+    advancedBy: 1,
+    issuedAt: "2026-07-16T15:07:00Z",
+    applied: true,
+    previousTick: 11,
+  });
+
+  const chunk = await reader?.read();
+  const text = new TextDecoder().decode(chunk?.value);
+
+  expect(text).not.toContain("token");
+  expect(text).not.toContain("apiToken");
+  await reader?.cancel();
 });
 
 test("catalog and solar routes proxy backend handlers", async () => {
@@ -851,6 +1123,8 @@ test("GET /registration still returns JSON when static assets are enabled", asyn
         habitatId: "habitat-123",
         displayName: "Starlight Forge",
         apiToken: "token-abc",
+        streamUrl: null,
+        stream: null,
         moduleCount: 2,
       }),
     });
@@ -864,6 +1138,8 @@ test("GET /registration still returns JSON when static assets are enabled", asyn
         habitatUuid: "uuid-123",
         habitatId: "habitat-123",
         displayName: "Starlight Forge",
+        streamUrl: null,
+        stream: null,
         moduleCount: 2,
       },
     });

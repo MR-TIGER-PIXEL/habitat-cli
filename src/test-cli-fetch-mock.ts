@@ -7,16 +7,41 @@ type Fixture = {
   body: unknown;
 };
 
+type ClockEventFixture = {
+  event?: unknown;
+  raw?: string;
+};
+
 const rawFixtures = process.env.HABITAT_TEST_FETCH_FIXTURES;
 const fixtures = rawFixtures
   ? JSON.parse(rawFixtures) as Record<string, Fixture>
   : {};
+const rawClockEvents = process.env.HABITAT_TEST_CLOCK_EVENTS;
+const clockEvents = rawClockEvents
+  ? JSON.parse(rawClockEvents) as ClockEventFixture[]
+  : null;
 const backend = createApp({ cwd: process.cwd() });
 
 const mockedFetch = Object.assign(
   async (input: RequestInfo | URL, init?: RequestInit | BunFetchRequestInit) => {
     const method = init?.method ?? "GET";
     const url = typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+
+    if (clockEvents && method === "GET" && url === "http://localhost:8787/clock/events") {
+      return new Response(new ReadableStream<Uint8Array>({
+        start(controller) {
+          const encoder = new TextEncoder();
+          for (const item of clockEvents) {
+            const payload = item.raw ?? `data: ${JSON.stringify(item.event)}\n\n`;
+            controller.enqueue(encoder.encode(payload));
+          }
+          controller.close();
+        },
+      }), {
+        status: 200,
+        headers: { "content-type": "text/event-stream; charset=utf-8" },
+      });
+    }
 
     if (url.startsWith("http://localhost:8787")) {
       return backend.fetch(new Request(url, init));

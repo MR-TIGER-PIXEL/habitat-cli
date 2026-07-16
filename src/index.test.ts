@@ -92,6 +92,15 @@ function runCliWithMockedFetch(
   fixtures: Record<string, { status: number; body: unknown }>,
   ...args: string[]
 ) {
+  return runCliWithMockedFetchAndEnv(cwd, fixtures, {}, ...args);
+}
+
+function runCliWithMockedFetchAndEnv(
+  cwd: string,
+  fixtures: Record<string, { status: number; body: unknown }>,
+  env: Record<string, string>,
+  ...args: string[]
+) {
   return Bun.spawnSync({
     cmd: [
       "bun",
@@ -109,6 +118,7 @@ function runCliWithMockedFetch(
       KEPLER_BASE_URL: "https://planet.turingguild.com",
       HABITAT_API_BASE_URL: "http://localhost:8787",
       HABITAT_TEST_FETCH_FIXTURES: JSON.stringify(fixtures),
+      ...env,
     },
   });
 }
@@ -398,9 +408,44 @@ function createRegistrationDatabase(habitatDirectory: string): Database {
       display_name TEXT NOT NULL,
       habitat_uuid TEXT NOT NULL,
       habitat_id TEXT NOT NULL,
-      base_url TEXT NOT NULL
+      base_url TEXT NOT NULL,
+      api_token TEXT NOT NULL DEFAULT '',
+      stream_url TEXT,
+      stream_metadata_json TEXT,
+      module_count INTEGER NOT NULL DEFAULT 0
+    );
+
+    CREATE TABLE IF NOT EXISTS clock_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mode TEXT NOT NULL,
+      latest_absolute_kepler_tick INTEGER,
+      latest_advanced_by INTEGER,
+      connection_state TEXT NOT NULL,
+      last_connected_at TEXT,
+      last_message_at TEXT,
+      last_disconnected_at TEXT,
+      last_error_at TEXT,
+      last_error_message TEXT
     );
   `);
+  database
+    .query(
+      `INSERT INTO clock_state (
+        id,
+        mode,
+        latest_absolute_kepler_tick,
+        latest_advanced_by,
+        connection_state,
+        last_connected_at,
+        last_message_at,
+        last_disconnected_at,
+        last_error_at,
+        last_error_message
+      )
+       VALUES (1, 'manual', NULL, NULL, 'disconnected', NULL, NULL, NULL, NULL, NULL)
+       ON CONFLICT(id) DO NOTHING`,
+    )
+    .run();
   return database;
 }
 
@@ -411,20 +456,35 @@ function seedRegistration(
     habitatUuid?: string;
     habitatId?: string;
     baseUrl?: string;
+    apiToken?: string;
+    streamUrl?: string | null;
+    streamMetadataJson?: string | null;
+    moduleCount?: number;
   } = {},
 ): void {
   const database = createRegistrationDatabase(habitatDirectory);
   database.query("DELETE FROM registration").run();
   database
     .query(
-      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url)
-       VALUES (1, ?, ?, ?, ?)`,
+      `INSERT INTO registration (id, display_name, habitat_uuid, habitat_id, base_url, api_token, stream_url, stream_metadata_json, module_count)
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)`,
     )
     .run(
       input.displayName ?? "Artemis Ridge",
       input.habitatUuid ?? "a1408aa2-de20-4218-be5a-102aa55a12ce",
       input.habitatId ?? "habitat_a1408aa2_de20_4218_be5a_102aa55a12ce",
       input.baseUrl ?? "https://planet.turingguild.com",
+      input.apiToken ?? "kepler-stream-token",
+      input.streamUrl ?? "wss://planet.turingguild.com/planet/stream",
+      input.streamMetadataJson ?? JSON.stringify({
+        protocolVersion: "1.0",
+        subscriptions: ["ticks", "alerts"],
+        currentTick: 25,
+        tickIntervalMs: 1000,
+        ticksPerPulse: 1,
+        status: "running",
+      }),
+      input.moduleCount ?? 0,
     );
 }
 
@@ -725,6 +785,344 @@ test("status includes remote habitat details and local module count", async () =
   ]);
   expect(result.habitat.status).toBe("registered");
   expect(result.moduleCount).toBe(6);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("habitat status shows saved stream details and global --json returns stable status fields", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  seedRegistration(habitatDirectory, {
+    displayName: "Starlight Forge",
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+    apiToken: "kepler-stream-token",
+    streamUrl: "wss://planet.turingguild.com/planet/stream",
+    moduleCount: 6,
+    streamMetadataJson: JSON.stringify({
+      protocolVersion: "1.0",
+      subscriptions: ["ticks", "alerts"],
+      currentTick: 25,
+      tickIntervalMs: 1000,
+      ticksPerPulse: 1,
+      status: "running",
+    }),
+  });
+  seedModules(
+    habitatDirectory,
+    createRegistrationPayload().starterModules.map((module) => ({
+      ...module,
+      source: "registration" as const,
+    })),
+  );
+  seedTickState(habitatDirectory, 12);
+
+  const shown = runCli(cwd, "status");
+  const json = runCli(cwd, "--json", "status");
+
+  expect(shown.exitCode).toBe(0);
+  const stdout = shown.stdout.toString();
+  expect(stdout).toContain("displayName: Starlight Forge");
+  expect(stdout).toContain("habitatId: habitat_11111111_1111_4111_8111_111111111111");
+  expect(stdout).toContain("habitatUuid: 11111111-1111-4111-8111-111111111111");
+  expect(stdout).toContain("moduleCount: 6");
+  expect(stdout).toContain("streamUrl: wss://planet.turingguild.com/planet/stream");
+  expect(stdout).toContain("apiToken: kepler-stream-token");
+  expect(stdout).toContain("streamSubscriptions: ticks, alerts");
+  expect(stdout).toContain("streamProtocolVersion: 1.0");
+  expect(stdout).toContain("streamCurrentTick: 25");
+  expect(stdout).toContain("streamTickIntervalMs: 1000");
+  expect(stdout).toContain("streamTicksPerPulse: 1");
+  expect(stdout).toContain("streamStatus: running");
+
+  expect(json.exitCode).toBe(0);
+  expect(JSON.parse(json.stdout.toString())).toEqual({
+    registration: {
+      displayName: "Starlight Forge",
+      habitatUuid: "11111111-1111-4111-8111-111111111111",
+      habitatId: "habitat_11111111_1111_4111_8111_111111111111",
+      apiToken: "kepler-stream-token",
+      streamUrl: "wss://planet.turingguild.com/planet/stream",
+      stream: {
+        protocolVersion: "1.0",
+        subscriptions: ["ticks", "alerts"],
+        currentTick: 25,
+        tickIntervalMs: 1000,
+        ticksPerPulse: 1,
+        status: "running",
+      },
+      moduleCount: 6,
+    },
+    habitat: {
+      habitatSlug: "test-habitat",
+      status: "online",
+      catalogVersion: "test",
+      lastSeenAt: null,
+    },
+    moduleCount: 6,
+    currentTick: 12,
+  });
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("habitat register refreshes an incomplete legacy registration with the same UUID and preserves local state", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+
+  seedRegistration(habitatDirectory, {
+    displayName: "bobs house",
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_legacy_11111111",
+    apiToken: "",
+    streamUrl: null,
+    streamMetadataJson: null,
+    moduleCount: 2,
+  });
+  seedModules(habitatDirectory, [
+    {
+      id: "module-command-1",
+      blueprintId: "command-module",
+      displayName: "Command Module",
+      connectedTo: ["module-lab-1"],
+      runtimeAttributes: { status: "active", health: 100 },
+      capabilities: ["habitat-command"],
+      source: "registration",
+    },
+    {
+      id: "module-lab-1",
+      blueprintId: "lab-module",
+      displayName: "Lab Module",
+      connectedTo: ["module-command-1"],
+      runtimeAttributes: { status: "online", health: 95 },
+      capabilities: ["science"],
+      source: "local",
+    },
+  ]);
+  seedHumans(habitatDirectory, [
+    {
+      id: "human-1",
+      displayName: "Ava",
+      locationModuleId: "module-command-1",
+    },
+  ]);
+  seedInventory(habitatDirectory, { ferrite: 90, water: 12 });
+  seedTickState(habitatDirectory, 12);
+  seedAlertContract(habitatDirectory);
+  seedDeployedExplorer(habitatDirectory, 4, -3);
+  const database = createLocalStateDatabase(habitatDirectory);
+  database.query("INSERT INTO alerts (id, alert_json) VALUES (?, ?)").run(
+    "alert-1",
+    JSON.stringify({
+      id: "alert-1",
+      kind: "warning",
+      severity: "medium",
+      status: "open",
+      message: "Legacy alert should survive refresh.",
+      createdAt: "2026-07-16T00:00:00.000Z",
+    }),
+  );
+
+  const result = runCliWithMockedFetch(
+    cwd,
+    {
+      "POST https://planet.turingguild.com/habitats/register": {
+        status: 201,
+        body: {
+          habitatId: "habitat_refreshed_11111111",
+          streamUrl: "wss://planet.turingguild.com/planet/stream",
+          apiToken: "kepler-upgraded-stream-token",
+          stream: {
+            protocolVersion: "1.0",
+            subscriptions: ["ticks", "alerts"],
+            currentTick: 0,
+            ticksPerPulse: 1,
+            status: "running",
+          },
+          contracts: {
+            alerts: {
+              schemaVersion: "1.0",
+              schema: {
+                type: "object",
+                required: ["kind", "severity", "status"],
+              },
+            },
+          },
+          starterModules: [],
+          starterHumans: [],
+          blueprints: [],
+        },
+      },
+    },
+    "register",
+    "--name",
+    "bobs house",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr.toString()).toBe("");
+  expect(result.stdout.toString()).toContain('Registered habitat "bobs house".');
+
+  const statusResult = runCli(cwd, "--json", "status");
+  expect(statusResult.exitCode).toBe(0);
+  const statusJson = JSON.parse(statusResult.stdout.toString());
+  expect(statusJson.registration).toEqual({
+    displayName: "bobs house",
+    habitatUuid: "11111111-1111-4111-8111-111111111111",
+    habitatId: "habitat_refreshed_11111111",
+    apiToken: "kepler-upgraded-stream-token",
+    streamUrl: "wss://planet.turingguild.com/planet/stream",
+    stream: {
+      protocolVersion: "1.0",
+      subscriptions: ["ticks", "alerts"],
+      currentTick: 0,
+      ticksPerPulse: 1,
+      status: "running",
+    },
+    moduleCount: 2,
+  });
+  expect(readModulesJson(habitatDirectory)).toContain('"module-lab-1"');
+  expect(readHumansJson(habitatDirectory)).toContain('"Ava"');
+  expect(readInventoryJson(habitatDirectory)).toBe('{\n  "ferrite": 90,\n  "water": 12\n}\n');
+  expect(readTickStateValue(habitatDirectory)).toBe(12);
+  expect(readExplorationStateJson(habitatDirectory)).toContain('"deployedHumanId": "human-1"');
+  expect(readAlertsJson(habitatDirectory)).toContain('"alert-1"');
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("habitat clock status shows default persisted clock state and global --json returns stable clock fields", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory);
+
+  const shown = runCli(cwd, "clock", "status");
+  const json = runCli(cwd, "--json", "clock", "status");
+
+  expect(shown.exitCode).toBe(0);
+  const stdout = shown.stdout.toString();
+  expect(stdout).toContain("mode: manual");
+  expect(stdout).toContain("listening: off");
+  expect(stdout).toContain("manualTicksAllowed: yes");
+  expect(stdout).toContain("connection: disconnected");
+  expect(stdout).not.toContain("apiToken");
+
+  expect(json.exitCode).toBe(0);
+  expect(JSON.parse(json.stdout.toString())).toEqual({
+    clock: {
+      mode: "manual",
+      listening: false,
+      manualTicksAllowed: true,
+      connectionState: "disconnected",
+      latestAbsoluteKeplerTick: null,
+      latestAdvancedBy: null,
+      lastConnectedAt: null,
+      lastMessageAt: null,
+      lastErrorAt: null,
+      lastErrorMessage: null,
+    },
+  });
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("habitat clock watch uses the local backend endpoint and prints one line per future event", () => {
+  const cwd = createWorkspace();
+
+  const result = runCliWithMockedFetchAndEnv(
+    cwd,
+    {},
+    {
+      HABITAT_TEST_CLOCK_EVENTS: JSON.stringify([
+        {
+          event: {
+            tick: 42,
+            advancedBy: 3,
+            issuedAt: "2026-07-16T15:05:00Z",
+            applied: true,
+            previousTick: 39,
+          },
+        },
+      ]),
+    },
+    "clock",
+    "watch",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr.toString()).toBe("");
+  expect(result.stdout.toString()).toContain("tick=42");
+  expect(result.stdout.toString()).toContain("advancedBy=3");
+  expect(result.stdout.toString()).toContain("issuedAt=2026-07-16T15:05:00Z");
+  expect(result.stdout.toString()).toContain("applied=yes");
+  expect(result.stdout.toString()).not.toContain("apiToken");
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("habitat --jsonl clock watch emits one stable JSON object per event and ignores malformed SSE", () => {
+  const cwd = createWorkspace();
+
+  const result = runCliWithMockedFetchAndEnv(
+    cwd,
+    {},
+    {
+      HABITAT_TEST_CLOCK_EVENTS: JSON.stringify([
+        { raw: "data: {bad-json}\n\n" },
+        {
+          event: {
+            tick: 50,
+            advancedBy: 2,
+            issuedAt: "2026-07-16T15:06:00Z",
+            applied: false,
+            previousTick: 48,
+          },
+        },
+      ]),
+    },
+    "--jsonl",
+    "clock",
+    "watch",
+  );
+
+  expect(result.exitCode).toBe(0);
+  expect(result.stderr.toString()).toBe("");
+  expect(result.stdout.toString().trim().split("\n")).toEqual([
+    JSON.stringify({
+      tick: 50,
+      advancedBy: 2,
+      issuedAt: "2026-07-16T15:06:00Z",
+      applied: false,
+      previousTick: 48,
+    }),
+  ]);
+
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("habitat clock listen on fails safely without saved stream credentials", () => {
+  const cwd = createWorkspace();
+  const habitatDirectory = path.join(cwd, ".habitat");
+  mkdirSync(habitatDirectory, { recursive: true });
+  seedRegistration(habitatDirectory, {
+    apiToken: "",
+    streamUrl: null,
+    streamMetadataJson: null,
+  });
+
+  const result = runCli(cwd, "clock", "listen", "on");
+  const status = runCli(cwd, "clock", "status");
+
+  expect(result.exitCode).toBe(1);
+  expect(result.stderr.toString()).toContain("Missing saved Kepler stream credentials");
+  expect(result.stderr.toString()).not.toContain("apiToken");
+  expect(status.stdout.toString()).toContain("mode: manual");
+  expect(status.stdout.toString()).toContain("listening: off");
+  expect(status.stdout.toString()).toContain("manualTicksAllowed: yes");
 
   rmSync(cwd, { recursive: true, force: true });
 });

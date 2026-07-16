@@ -1,11 +1,15 @@
 import { createApiClient } from "./client";
 import type { ActiveConstructionJob, CanceledConstruction, ConstructionPlan, CompletedConstruction, HabitatAlert, OfficialResource, SolarIrradiance, StartedConstruction, StoredBlueprint, TickBatterySummary, SolarChargingSummary } from "../kepler";
 import type { ExplorationState, LocalHabitatModule, StarterHuman } from "../kepler";
+import type { HabitatRegistrationStream } from "../kepler";
 
 export type BackendRegistration = {
   habitatUuid: string;
   habitatId: string;
   displayName: string;
+  apiToken: string;
+  streamUrl: string | null;
+  stream: HabitatRegistrationStream | null;
   moduleCount: number;
 };
 
@@ -19,6 +23,29 @@ export type BackendStatus = {
   };
   moduleCount: number;
   currentTick: number;
+};
+
+export type BackendClockStatus = {
+  clock: {
+    mode: "manual" | "kepler";
+    listening: boolean;
+    manualTicksAllowed: boolean;
+    connectionState: "connected" | "connecting" | "disconnected" | "error";
+    latestAbsoluteKeplerTick: number | null;
+    latestAdvancedBy: number | null;
+    lastConnectedAt: string | null;
+    lastMessageAt: string | null;
+    lastErrorAt: string | null;
+    lastErrorMessage: string | null;
+  };
+};
+
+export type BackendClockEvent = {
+  tick: number;
+  advancedBy: number;
+  issuedAt: string;
+  applied: boolean;
+  previousTick?: number | null;
 };
 
 export type BackendBlueprintCatalog = {
@@ -130,6 +157,7 @@ export function createBackendApiClient(config: BackendConfig) {
     baseUrl: config.baseUrl,
     fetchImpl: config.fetchImpl,
   });
+  const fetchImpl = config.fetchImpl ?? fetch;
 
   return {
     async getRegistration(): Promise<BackendRegistration | null> {
@@ -152,6 +180,41 @@ export function createBackendApiClient(config: BackendConfig) {
 
     async status(): Promise<BackendStatus> {
       return client.requestJson("/status", { method: "GET" });
+    },
+
+    async clockStatus(): Promise<BackendClockStatus> {
+      return client.requestJson("/clock/status", { method: "GET" });
+    },
+
+    async clockListenOn(): Promise<BackendClockStatus> {
+      return client.requestJson("/clock/listen/on", { method: "POST" });
+    },
+
+    async clockListenOff(): Promise<BackendClockStatus> {
+      return client.requestJson("/clock/listen/off", { method: "POST" });
+    },
+
+    async watchClockEvents(input: {
+      signal?: AbortSignal;
+      onEvent: (event: BackendClockEvent) => void;
+    }): Promise<void> {
+      const response = await fetchImpl(`${config.baseUrl}/clock/events`, {
+        method: "GET",
+        headers: {
+          accept: "text/event-stream",
+        },
+        signal: input.signal,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Request failed with ${response.status} ${response.statusText}.`);
+      }
+
+      if (!response.body) {
+        return;
+      }
+
+      await consumeClockEventStream(response.body, input.onEvent, input.signal);
     },
 
     async unregister(): Promise<{
@@ -347,4 +410,64 @@ export function createBackendApiClient(config: BackendConfig) {
       });
     },
   };
+}
+
+export async function consumeClockEventStream(
+  body: ReadableStream<Uint8Array>,
+  onEvent: (event: BackendClockEvent) => void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  const abortStream = () => {
+    void reader.cancel();
+  };
+
+  signal?.addEventListener("abort", abortStream, { once: true });
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+
+      buffer += decoder.decode(value, { stream: true });
+      const segments = buffer.split("\n\n");
+      buffer = segments.pop() ?? "";
+
+      for (const segment of segments) {
+        const event = parseClockEventSseSegment(segment);
+        if (event) {
+          onEvent(event);
+        }
+      }
+    }
+
+    const trailingEvent = parseClockEventSseSegment(buffer);
+    if (trailingEvent) {
+      onEvent(trailingEvent);
+    }
+  } finally {
+    signal?.removeEventListener("abort", abortStream);
+    reader.releaseLock();
+  }
+}
+
+function parseClockEventSseSegment(segment: string): BackendClockEvent | null {
+  const dataLines = segment
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trim());
+
+  if (dataLines.length === 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(dataLines.join("\n")) as BackendClockEvent;
+  } catch {
+    return null;
+  }
 }

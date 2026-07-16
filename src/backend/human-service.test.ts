@@ -16,6 +16,8 @@ function seedRegisteredState(cwd: string) {
     habitatId: "habitat-1",
     displayName: "Artemis Ridge",
     apiToken: "local-token",
+    streamUrl: null,
+    stream: null,
     moduleCount: 3,
   });
   writeModules(cwd, [

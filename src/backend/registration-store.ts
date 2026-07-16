@@ -5,6 +5,7 @@ import {
   type AlertContract,
   type HabitatAlert,
   type ExplorationState,
+  type HabitatRegistrationStream,
   type LocalHabitatModule,
   type PowerTickResult,
   type StarterHuman,
@@ -16,11 +17,27 @@ export type BackendRegistration = {
   habitatId: string;
   displayName: string;
   apiToken: string;
+  streamUrl: string | null;
+  stream: HabitatRegistrationStream | null;
   moduleCount: number;
 };
 
 export type BackendStatus = {
   currentTick: number;
+};
+
+export type ClockConnectionState = "connected" | "connecting" | "disconnected" | "error";
+
+export type BackendClockState = {
+  mode: "manual" | "kepler";
+  connectionState: ClockConnectionState;
+  latestAbsoluteKeplerTick: number | null;
+  latestAdvancedBy: number | null;
+  lastConnectedAt: string | null;
+  lastMessageAt: string | null;
+  lastDisconnectedAt: string | null;
+  lastErrorAt: string | null;
+  lastErrorMessage: string | null;
 };
 
 export type BackendInventoryEntry = {
@@ -56,7 +73,22 @@ function openDatabase(cwd: string): Database {
       habitat_id TEXT NOT NULL,
       display_name TEXT NOT NULL,
       api_token TEXT NOT NULL,
+      stream_url TEXT,
+      stream_metadata_json TEXT,
       module_count INTEGER NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS clock_state (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      mode TEXT NOT NULL,
+      latest_absolute_kepler_tick INTEGER,
+      latest_advanced_by INTEGER,
+      connection_state TEXT NOT NULL,
+      last_connected_at TEXT,
+      last_message_at TEXT,
+      last_disconnected_at TEXT,
+      last_error_at TEXT,
+      last_error_message TEXT
     );
 
     CREATE TABLE IF NOT EXISTS tick_state (
@@ -95,6 +127,7 @@ function openDatabase(cwd: string): Database {
     );
   `);
   migrateRegistrationTable(database);
+  ensureClockStateRow(database);
   return database;
 }
 
@@ -109,6 +142,33 @@ function migrateRegistrationTable(database: Database): void {
   if (!columnNames.has("module_count")) {
     database.exec("ALTER TABLE registration ADD COLUMN module_count INTEGER NOT NULL DEFAULT 0");
   }
+
+  if (!columnNames.has("stream_url")) {
+    database.exec("ALTER TABLE registration ADD COLUMN stream_url TEXT");
+  }
+
+  if (!columnNames.has("stream_metadata_json")) {
+    database.exec("ALTER TABLE registration ADD COLUMN stream_metadata_json TEXT");
+  }
+}
+
+function ensureClockStateRow(database: Database): void {
+  database.query(
+    `INSERT INTO clock_state (
+      id,
+      mode,
+      latest_absolute_kepler_tick,
+      latest_advanced_by,
+      connection_state,
+      last_connected_at,
+      last_message_at,
+      last_disconnected_at,
+      last_error_at,
+      last_error_message
+    )
+     VALUES (1, 'manual', NULL, NULL, 'disconnected', NULL, NULL, NULL, NULL, NULL)
+     ON CONFLICT(id) DO NOTHING`,
+  ).run();
 }
 
 export function readRegistration(cwd: string): BackendRegistration | null {
@@ -119,30 +179,55 @@ export function readRegistration(cwd: string): BackendRegistration | null {
       habitatId: string;
       displayName: string;
       apiToken: string;
+      streamUrl: string | null;
+      streamMetadataJson: string | null;
       moduleCount: number;
     }, []>(
-      "SELECT habitat_uuid AS habitatUuid, habitat_id AS habitatId, display_name AS displayName, api_token AS apiToken, module_count AS moduleCount FROM registration WHERE id = 1",
+      `SELECT habitat_uuid AS habitatUuid,
+              habitat_id AS habitatId,
+              display_name AS displayName,
+              api_token AS apiToken,
+              stream_url AS streamUrl,
+              stream_metadata_json AS streamMetadataJson,
+              module_count AS moduleCount
+       FROM registration WHERE id = 1`,
     )
     .get();
 
-  return row ?? null;
+  if (!row) {
+    return null;
+  }
+
+  return {
+    habitatUuid: row.habitatUuid,
+    habitatId: row.habitatId,
+    displayName: row.displayName,
+    apiToken: row.apiToken,
+    streamUrl: isNonEmptyString(row.streamUrl) ? row.streamUrl : null,
+    stream: parseStoredStreamMetadata(row.streamMetadataJson),
+    moduleCount: row.moduleCount,
+  };
 }
 
 export function writeRegistration(cwd: string, registration: BackendRegistration): void {
   ensureBackendDirectory(cwd);
   const database = openDatabase(cwd);
+  const streamUrl = normalizeStoredString(registration.streamUrl);
+  const streamMetadataJson = serializeStreamMetadata(registration.stream);
   if (registrationTableHasBaseUrl(database)) {
     const existingBaseUrl = readLegacyBaseUrl(database);
     database
       .query(
-        `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, base_url, api_token, module_count)
-         VALUES (1, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, base_url, api_token, stream_url, stream_metadata_json, module_count)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            habitat_uuid = excluded.habitat_uuid,
            habitat_id = excluded.habitat_id,
            display_name = excluded.display_name,
            base_url = excluded.base_url,
            api_token = excluded.api_token,
+           stream_url = excluded.stream_url,
+           stream_metadata_json = excluded.stream_metadata_json,
            module_count = excluded.module_count`,
       )
       .run(
@@ -151,18 +236,22 @@ export function writeRegistration(cwd: string, registration: BackendRegistration
         registration.displayName,
         existingBaseUrl,
         registration.apiToken,
+        streamUrl,
+        streamMetadataJson,
         registration.moduleCount,
       );
   } else {
     database
       .query(
-        `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, api_token, module_count)
-         VALUES (1, ?, ?, ?, ?, ?)
+        `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, api_token, stream_url, stream_metadata_json, module_count)
+         VALUES (1, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            habitat_uuid = excluded.habitat_uuid,
            habitat_id = excluded.habitat_id,
            display_name = excluded.display_name,
            api_token = excluded.api_token,
+           stream_url = excluded.stream_url,
+           stream_metadata_json = excluded.stream_metadata_json,
            module_count = excluded.module_count`,
       )
       .run(
@@ -170,9 +259,91 @@ export function writeRegistration(cwd: string, registration: BackendRegistration
         registration.habitatId,
         registration.displayName,
         registration.apiToken,
+        streamUrl,
+        streamMetadataJson,
         registration.moduleCount,
       );
   }
+}
+
+export function readClockState(cwd: string): BackendClockState {
+  const database = openDatabase(cwd);
+  const row = database.query<{
+    mode: BackendClockState["mode"];
+    connectionState: ClockConnectionState;
+    latestAbsoluteKeplerTick: number | null;
+    latestAdvancedBy: number | null;
+    lastConnectedAt: string | null;
+    lastMessageAt: string | null;
+    lastDisconnectedAt: string | null;
+    lastErrorAt: string | null;
+    lastErrorMessage: string | null;
+  }, []>(
+    `SELECT mode AS mode,
+            connection_state AS connectionState,
+            latest_absolute_kepler_tick AS latestAbsoluteKeplerTick,
+            latest_advanced_by AS latestAdvancedBy,
+            last_connected_at AS lastConnectedAt,
+            last_message_at AS lastMessageAt,
+            last_disconnected_at AS lastDisconnectedAt,
+            last_error_at AS lastErrorAt,
+            last_error_message AS lastErrorMessage
+     FROM clock_state WHERE id = 1`,
+  ).get();
+
+  return row ?? {
+    mode: "manual",
+    connectionState: "disconnected",
+    latestAbsoluteKeplerTick: null,
+    latestAdvancedBy: null,
+    lastConnectedAt: null,
+    lastMessageAt: null,
+    lastDisconnectedAt: null,
+    lastErrorAt: null,
+    lastErrorMessage: null,
+  };
+}
+
+export function writeClockState(cwd: string, state: BackendClockState): void {
+  ensureBackendDirectory(cwd);
+  const database = openDatabase(cwd);
+  database
+    .query(
+      `INSERT INTO clock_state (
+        id,
+        mode,
+        latest_absolute_kepler_tick,
+        latest_advanced_by,
+        connection_state,
+        last_connected_at,
+        last_message_at,
+        last_disconnected_at,
+        last_error_at,
+        last_error_message
+      )
+       VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(id) DO UPDATE SET
+         mode = excluded.mode,
+         latest_absolute_kepler_tick = excluded.latest_absolute_kepler_tick,
+         latest_advanced_by = excluded.latest_advanced_by,
+         connection_state = excluded.connection_state,
+         last_connected_at = excluded.last_connected_at,
+         last_message_at = excluded.last_message_at,
+         last_disconnected_at = excluded.last_disconnected_at,
+         last_error_at = excluded.last_error_at,
+         last_error_message = excluded.last_error_message`,
+    )
+    .run(
+      state.mode,
+      state.latestAbsoluteKeplerTick,
+      state.latestAdvancedBy,
+      state.connectionState,
+      state.lastConnectedAt,
+      state.lastMessageAt,
+      state.lastDisconnectedAt,
+      state.lastErrorAt,
+      state.lastErrorMessage,
+    );
 }
 
 export function deleteRegistration(cwd: string): void {
@@ -343,14 +514,16 @@ export function hydrateRegistrationState(
       const existingBaseUrl = readLegacyBaseUrl(database);
       database
         .query(
-          `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, base_url, api_token, module_count)
-           VALUES (1, ?, ?, ?, ?, ?, ?)
+          `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, base_url, api_token, stream_url, stream_metadata_json, module_count)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              habitat_uuid = excluded.habitat_uuid,
              habitat_id = excluded.habitat_id,
              display_name = excluded.display_name,
              base_url = excluded.base_url,
              api_token = excluded.api_token,
+             stream_url = excluded.stream_url,
+             stream_metadata_json = excluded.stream_metadata_json,
              module_count = excluded.module_count`,
         )
         .run(
@@ -359,18 +532,22 @@ export function hydrateRegistrationState(
           payload.registration.displayName,
           existingBaseUrl,
           payload.registration.apiToken,
+          normalizeStoredString(payload.registration.streamUrl),
+          serializeStreamMetadata(payload.registration.stream),
           payload.registration.moduleCount,
         );
     } else {
       database
         .query(
-          `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, api_token, module_count)
-           VALUES (1, ?, ?, ?, ?, ?)
+          `INSERT INTO registration (id, habitat_uuid, habitat_id, display_name, api_token, stream_url, stream_metadata_json, module_count)
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?)
            ON CONFLICT(id) DO UPDATE SET
              habitat_uuid = excluded.habitat_uuid,
              habitat_id = excluded.habitat_id,
              display_name = excluded.display_name,
              api_token = excluded.api_token,
+             stream_url = excluded.stream_url,
+             stream_metadata_json = excluded.stream_metadata_json,
              module_count = excluded.module_count`,
         )
         .run(
@@ -378,6 +555,8 @@ export function hydrateRegistrationState(
           payload.registration.habitatId,
           payload.registration.displayName,
           payload.registration.apiToken,
+          normalizeStoredString(payload.registration.streamUrl),
+          serializeStreamMetadata(payload.registration.stream),
           payload.registration.moduleCount,
         );
     }
@@ -515,6 +694,7 @@ export function persistTickStateSnapshot(
     modules: LocalHabitatModule[];
     exploration: ExplorationState;
     alerts: HabitatAlert[];
+    clockState?: BackendClockState;
   },
 ): Omit<PowerTickResult, "modules"> {
   ensureBackendDirectory(cwd);
@@ -550,6 +730,46 @@ export function persistTickStateSnapshot(
       insertAlert.run(alert.id, JSON.stringify(alert));
     }
 
+    if (payload.clockState) {
+      database
+        .query(
+          `INSERT INTO clock_state (
+            id,
+            mode,
+            latest_absolute_kepler_tick,
+            latest_advanced_by,
+            connection_state,
+            last_connected_at,
+            last_message_at,
+            last_disconnected_at,
+            last_error_at,
+            last_error_message
+          )
+           VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           ON CONFLICT(id) DO UPDATE SET
+             mode = excluded.mode,
+             latest_absolute_kepler_tick = excluded.latest_absolute_kepler_tick,
+             latest_advanced_by = excluded.latest_advanced_by,
+             connection_state = excluded.connection_state,
+             last_connected_at = excluded.last_connected_at,
+             last_message_at = excluded.last_message_at,
+             last_disconnected_at = excluded.last_disconnected_at,
+             last_error_at = excluded.last_error_at,
+             last_error_message = excluded.last_error_message`,
+        )
+        .run(
+          payload.clockState.mode,
+          payload.clockState.latestAbsoluteKeplerTick,
+          payload.clockState.latestAdvancedBy,
+          payload.clockState.connectionState,
+          payload.clockState.lastConnectedAt,
+          payload.clockState.lastMessageAt,
+          payload.clockState.lastDisconnectedAt,
+          payload.clockState.lastErrorAt,
+          payload.clockState.lastErrorMessage,
+        );
+    }
+
     return payload.tick;
   });
 
@@ -566,4 +786,66 @@ function readLegacyBaseUrl(database: Database): string {
     "SELECT base_url AS baseUrl FROM registration WHERE id = 1",
   ).get();
   return row?.baseUrl ?? "";
+}
+
+function isNonEmptyString(value: string | null | undefined): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
+function normalizeStoredString(value: string | null | undefined): string | null {
+  return isNonEmptyString(value) ? value : null;
+}
+
+function parseStoredStreamMetadata(streamMetadataJson: string | null): HabitatRegistrationStream | null {
+  if (!isNonEmptyString(streamMetadataJson)) {
+    return null;
+  }
+
+  let parsed: Partial<HabitatRegistrationStream> & Record<string, unknown>;
+  try {
+    parsed = JSON.parse(streamMetadataJson) as Partial<HabitatRegistrationStream> & Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  if (
+    !isNonEmptyString(parsed.protocolVersion)
+    || !Array.isArray(parsed.subscriptions)
+    || parsed.subscriptions.some((item) => typeof item !== "string")
+    || !Number.isInteger(parsed.currentTick)
+    || (parsed.currentTick ?? -1) < 0
+    || !Number.isInteger(parsed.ticksPerPulse)
+    || (parsed.ticksPerPulse ?? 0) <= 0
+    || !isNonEmptyString(parsed.status)
+  ) {
+    return null;
+  }
+
+  const stream: HabitatRegistrationStream = {
+    protocolVersion: parsed.protocolVersion,
+    subscriptions: parsed.subscriptions,
+    currentTick: parsed.currentTick as number,
+    ticksPerPulse: parsed.ticksPerPulse as number,
+    status: parsed.status,
+  };
+
+  if ("tickIntervalMs" in parsed && parsed.tickIntervalMs !== undefined) {
+    if (!Number.isInteger(parsed.tickIntervalMs) || parsed.tickIntervalMs <= 0) {
+      return null;
+    }
+    return {
+      ...stream,
+      tickIntervalMs: parsed.tickIntervalMs,
+    };
+  }
+
+  return stream;
+}
+
+function serializeStreamMetadata(stream: HabitatRegistrationStream | null | undefined): string | null {
+  if (!stream) {
+    return null;
+  }
+
+  return JSON.stringify(stream);
 }

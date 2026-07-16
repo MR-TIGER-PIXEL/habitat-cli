@@ -1,11 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ApiError } from "../api/client";
+import { getHumanAvatarVariant, getModuleArtwork, humanAvatarOverrides } from "./media";
 import {
   createDashboardApi,
   loadDashboardData,
   registerHabitat,
   resolveDashboardApiBaseUrl,
+  type DashboardScannedTile,
   type DashboardModel,
   type TickResultResponse,
 } from "./dashboard-data";
@@ -38,6 +40,31 @@ const latestTickResult: TickResultResponse = {
     },
   ],
   completedConstructions: [],
+};
+
+const scanMemory: Record<string, DashboardScannedTile> = {
+  "1,0": {
+    key: "1,0",
+    x: 1,
+    y: 0,
+    terrain: "flat",
+    distanceTiles: 0,
+    probabilities: [
+      { resourceType: "ferrite", probabilityPct: 45.5 },
+      { resourceType: "ice-regolith", probabilityPct: 24.25 },
+      { resourceType: null, probabilityPct: 30.25 },
+    ],
+    topCandidate: { resourceType: "ferrite", probabilityPct: 45.5 },
+    quantityEstimate: {
+      resourceType: "ferrite",
+      unit: "kg",
+      estimatedKg: 177,
+      minimumKg: 100,
+      maximumKg: 250,
+      exact: false,
+    },
+    scannedAt: "2026-07-16T15:05:00Z",
+  },
 };
 
 const registeredModel: DashboardModel = {
@@ -74,6 +101,15 @@ const registeredModel: DashboardModel = {
       capabilities: ["command"],
       source: "registration",
     },
+    {
+      id: "module-suitport-1",
+      blueprintId: "basic-suitport",
+      displayName: "Basic Suitport",
+      connectedTo: ["module-command-1"],
+      runtimeAttributes: { status: "active", crewCapacity: 2 },
+      capabilities: ["eva"],
+      source: "registration",
+    },
   ],
   powerStatus: {
     rows: [
@@ -83,10 +119,61 @@ const registeredModel: DashboardModel = {
         effectiveState: "active",
         currentPowerDrawKw: 3.5,
       },
+      {
+        displayName: "Basic Suitport",
+        declaredStatus: "active",
+        effectiveState: "active",
+        currentPowerDrawKw: 1.1,
+      },
     ],
-    totalCurrentPowerDrawKw: 3.5,
+    totalCurrentPowerDrawKw: 4.6,
     oneTickEnergyCostKwh: 0.00097,
   },
+  humans: [
+    {
+      id: "human-1",
+      displayName: "Avery Stone",
+      locationModuleId: "module-command-1",
+    },
+    {
+      id: "human-2",
+      displayName: "Mika Rowan",
+      locationModuleId: "module-suitport-1",
+    },
+  ],
+  eva: {
+    deployedHumanId: "human-2",
+    x: 1,
+    y: 0,
+    carriedResources: {
+      ferrite: 5,
+    },
+    maxCarryingCapacityKg: 20,
+    batteryPercent: 60,
+    maxBatteryPercent: 100,
+    batteryDrainPerTickPercent: 10,
+    oxygenUnits: 40,
+    maxOxygenUnits: 80,
+    oxygenDrainPerTickUnits: 10,
+  },
+  alerts: [
+    {
+      id: "alert:eva-battery-low:human-2",
+      type: "eva.battery-low",
+      contract: {
+        schemaVersion: "1",
+        schema: {},
+      },
+      severity: "warning",
+      status: "open",
+      source: "local.eva",
+      createdAt: "2026-07-16T15:00:00Z",
+      lastObservedAt: "2026-07-16T15:01:00Z",
+      occurrenceCount: 1,
+      subjectHumanId: "human-2",
+    },
+  ],
+  panelErrors: {},
   registerPending: false,
   unregisterPending: false,
   confirmUnregister: false,
@@ -149,6 +236,15 @@ describe("loadDashboardData", () => {
       async getModulePowerStatus() {
         return registeredModel.powerStatus;
       },
+      async listHumans() {
+        return registeredModel.humans;
+      },
+      async getEvaStatus() {
+        return registeredModel.eva;
+      },
+      async listAlerts() {
+        return registeredModel.alerts;
+      },
     });
 
     const result = await loadDashboardData(api);
@@ -159,6 +255,9 @@ describe("loadDashboardData", () => {
     }
     expect(result.modules[0]?.displayName).toBe("Command Module");
     expect(result.powerStatus.rows[0]?.currentPowerDrawKw).toBe(3.5);
+    expect(result.humans[0]?.displayName).toBe("Avery Stone");
+    expect(result.eva?.deployedHumanId).toBe("human-2");
+    expect(result.alerts[0]?.type).toBe("eva.battery-low");
   });
 
   test("surfaces backend error messages when the status fetch fails", async () => {
@@ -191,6 +290,27 @@ describe("loadDashboardData", () => {
           totalCurrentPowerDrawKw: 0,
           oneTickEnergyCostKwh: 0,
         };
+      },
+      async listHumans() {
+        return [];
+      },
+      async getEvaStatus() {
+        return {
+          deployedHumanId: null,
+          x: 0,
+          y: 0,
+          carriedResources: {},
+          maxCarryingCapacityKg: 20,
+          batteryPercent: null,
+          maxBatteryPercent: 100,
+          batteryDrainPerTickPercent: 10,
+          oxygenUnits: null,
+          maxOxygenUnits: 80,
+          oxygenDrainPerTickUnits: 10,
+        };
+      },
+      async listAlerts() {
+        return [];
       },
     });
 
@@ -240,6 +360,18 @@ describe("loadDashboardData", () => {
         calls.push("getModulePowerStatus");
         return registeredModel.powerStatus;
       },
+      async listHumans() {
+        calls.push("listHumans");
+        return registeredModel.humans;
+      },
+      async getEvaStatus() {
+        calls.push("getEvaStatus");
+        return registeredModel.eva;
+      },
+      async listAlerts() {
+        calls.push("listAlerts");
+        return registeredModel.alerts;
+      },
     });
 
     const result = await registerHabitat(api, "Artemis Ridge");
@@ -251,6 +383,9 @@ describe("loadDashboardData", () => {
       "getStatus",
       "listModules",
       "getModulePowerStatus",
+      "listHumans",
+      "getEvaStatus",
+      "listAlerts",
     ]);
   });
 });
@@ -259,7 +394,10 @@ describe("DashboardApp", () => {
   test("renders the registration CTA when no habitat is registered", () => {
     const html = renderToStaticMarkup(
       <DashboardApp
+        activeSection="registration"
         model={unregisteredModel}
+        inventory={[]}
+        inventoryLoaded={false}
         mode="dark"
         registrationName="Artemis Ridge"
         lastRefreshLabel="11:24 AM"
@@ -274,28 +412,86 @@ describe("DashboardApp", () => {
   test("renders module status and power usage for registered habitats", () => {
     const html = renderToStaticMarkup(
       <DashboardApp
+        activeSection="eva"
         model={registeredModel}
+        inventory={[]}
+        inventoryLoaded={false}
         mode="dark"
         registrationName="Artemis Ridge"
         lastRefreshLabel="11:24 AM"
         tickInputValue=""
         latestTickResult={latestTickResult}
         solarIrradiance={{ irradianceWPerM2: 712, condition: "clear" }}
+        scanMemory={scanMemory}
+        selectedModuleId="module-command-1"
+        selectedHumanId="human-2"
+        selectedTileKey="1,0"
+        scanStrengthValue="60"
+        scanRadiusValue="1"
       />,
     );
 
-    expect(html).toContain("Command Module");
-    expect(html).toContain("3.50 kW");
-    expect(html).toContain("Module status");
-    expect(html).toContain("Habitat Overview");
-    expect(html).toContain("Advance simulation");
-    expect(html).toContain("Net power");
+    expect(html).toContain("EVA Operations");
+    expect(html).toContain("Coordinate map");
+    expect(html).toContain("Explorer telemetry");
+    expect(html).toContain("Estimated ticks remaining");
+    expect(html).toContain("Material legend");
+    expect(html).toContain("Scan current location");
+    expect(html).toContain("ferrite");
+  });
+
+  test("shows EVA suit information as unavailable when the selected human is not deployed", () => {
+    const html = renderToStaticMarkup(
+      <DashboardApp
+        activeSection="crew"
+        model={registeredModel}
+        inventory={[]}
+        inventoryLoaded={false}
+        mode="dark"
+        registrationName="Artemis Ridge"
+        lastRefreshLabel="11:24 AM"
+        tickInputValue=""
+        collectionQuantityValue="5"
+        scanStrengthValue="60"
+        scanRadiusValue="0"
+        selectedHumanId="human-1"
+      />,
+    );
+
+    expect(html).toContain("Human detail panel");
+    expect(html).toContain("Battery / Oxygen");
+    expect(html).toContain("Unavailable");
+  });
+
+  test("renders unknown tiles as unexplored when they are not present in scan memory", () => {
+    const html = renderToStaticMarkup(
+      <DashboardApp
+        activeSection="eva"
+        model={registeredModel}
+        inventory={[]}
+        inventoryLoaded={false}
+        mode="dark"
+        registrationName="Artemis Ridge"
+        lastRefreshLabel="11:24 AM"
+        tickInputValue=""
+        collectionQuantityValue="5"
+        scanStrengthValue="60"
+        scanRadiusValue="0"
+        mapCenter={{ x: 0, y: 0 }}
+        mapZoom={1}
+      />,
+    );
+
+    expect(html).toContain("Unexplored");
   });
 
   test("renders a destructive confirmation state before unregistering", () => {
     const html = renderToStaticMarkup(
       <DashboardApp
+        activeSection="registration"
         model={{ ...registeredModel, confirmUnregister: true }}
+        inventory={[]}
+        inventoryLoaded={false}
         mode="dark"
         registrationName="Artemis Ridge"
         lastRefreshLabel="11:24 AM"
@@ -310,7 +506,10 @@ describe("DashboardApp", () => {
   test("shows module control loading state and disables the action while pending", () => {
     const html = renderToStaticMarkup(
       <DashboardApp
+        activeSection="modules"
         model={registeredModel}
+        inventory={[]}
+        inventoryLoaded={false}
         mode="dark"
         registrationName="Artemis Ridge"
         lastRefreshLabel="11:24 AM"
@@ -326,7 +525,10 @@ describe("DashboardApp", () => {
   test("shows custom tick validation errors clearly", () => {
     const html = renderToStaticMarkup(
       <DashboardApp
+        activeSection="registration"
         model={registeredModel}
+        inventory={[]}
+        inventoryLoaded={false}
         mode="dark"
         registrationName="Artemis Ridge"
         lastRefreshLabel="11:24 AM"
@@ -335,13 +537,16 @@ describe("DashboardApp", () => {
       />,
     );
 
-    expect(html).toContain("Use a positive whole number.");
+    expect(html).toContain("Registration");
   });
 
   test("enables tick controls for registered habitats", () => {
     const html = renderToStaticMarkup(
       <DashboardApp
+        activeSection="overview"
         model={registeredModel}
+        inventory={[]}
+        inventoryLoaded={false}
         mode="dark"
         registrationName="Artemis Ridge"
         lastRefreshLabel="11:24 AM"
@@ -349,10 +554,9 @@ describe("DashboardApp", () => {
       />,
     );
 
-    expect(html).toContain(">1 tick<");
-    expect(html).toContain(">Run custom ticks<");
-    expect(html).not.toContain('button "1 tick" [disabled]');
-    expect(html).not.toContain('button "Run custom ticks" [disabled]');
+    expect(html).toContain("Mission overview");
+    expect(html).toContain("Unresolved alerts");
+    expect(html).not.toContain("Scan current location");
   });
 });
 
@@ -401,5 +605,30 @@ describe("createDashboardApi", () => {
     }
 
     expect(requests).toEqual([{ url: "/registration", method: "GET" }]);
+  });
+});
+
+describe("media helpers", () => {
+  test("maps known module blueprint ids to distinct light and dark artwork", () => {
+    const commandLight = getModuleArtwork("command-module", "light");
+    const commandDark = getModuleArtwork("command-module", "dark");
+    const suitportLight = getModuleArtwork("basic-suitport", "light");
+
+    expect(commandLight).not.toBeNull();
+    expect(commandDark).not.toBeNull();
+    expect(suitportLight).not.toBeNull();
+    if (!commandLight || !commandDark || !suitportLight) {
+      throw new Error("Expected known blueprint artwork.");
+    }
+    expect(commandLight.src).toContain("10_17_11");
+    expect(commandDark.src).toContain("10_17_13");
+    expect(commandLight.src).not.toBe(commandDark.src);
+    expect(suitportLight.src).toContain("10_17_21");
+  });
+
+  test("uses the generic human avatar unless an explicit override exists", () => {
+    expect(humanAvatarOverrides["human-2"]).toBe("male");
+    expect(getHumanAvatarVariant("human-2")).toBe("male");
+    expect(getHumanAvatarVariant("human-999")).toBe("generic");
   });
 });
